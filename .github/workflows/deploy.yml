@@ -1,0 +1,26 @@
+name: Deploy CineBro to Azure
+
+on:
+  push:
+    branches: [ main ] # Agar teri branch ka naam master hai toh 'master' likhna
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH into Azure and Deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AZURE_HOST }}
+          username: ${{ secrets.AZURE_USERNAME }}
+          key: ${{ secrets.AZURE_SSH_KEY }}
+          script: |
+            cd ~/CineBro
+            git pull origin main
+            source venv/bin/activate
+            # Purane bots ko specifically kill karo (sab kuch udaana safe nahi hai)
+            pkill -f "python3 bot.py" || true
+            pkill -f "python3 main.py" || true
+            # Naya screen session background mein start karo
+            screen -dmS cinebro_live bash -c 'cd ~/CineBro && source venv/bin/activate && python3 main.py & python3 bot.py'
+            echo "✅ Deployment Successful! Bot is running."
