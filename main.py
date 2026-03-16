@@ -29,7 +29,7 @@ app = Client("userbot_main", api_id=API_ID, api_hash=API_HASH, session_string=SE
 QUALITY_PATTERN = re.compile(r"\b(480p|720p|1080p|2160p|4k)\b", re.IGNORECASE)
 YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
 LANG_TOKEN_PATTERN = re.compile(
-    r"(dual(?:\s*audio)?|multi(?:\s*audio)?|hindi|english|tamil|telugu|malayalam|kannada|bengali|punjabi|marathi)",
+    r"\b(dual(?:\s*audio)?|multi(?:\s*audio)?|hindi|english|tamil|telugu|malayalam|kannada|bengali|punjabi|marathi)\b",
     re.IGNORECASE,
 )
 SEASON_RANGE_PATTERN = re.compile(
@@ -117,18 +117,18 @@ def parse_media_metadata(raw_text: str) -> dict:
     year_match = YEAR_PATTERN.search(normalized)
     year = int(year_match.group(1)) if year_match else 0
 
-    clean_title = text
+    # generate clean_title using normalized to ensure word boundaries (\b) match correctly
+    # especially for cases like "NF_Series_Dual" -> "NF Series Dual"
+    clean_title = normalized
     clean_title = YEAR_PATTERN.sub(" ", clean_title)
-    
-    for mat in LANG_TOKEN_PATTERN.finditer(clean_title):
-        clean_title = clean_title.replace(mat.group(0), " ")
-        
+    clean_title = LANG_TOKEN_PATTERN.sub(" ", clean_title)
     clean_title = NOISE_PATTERN.sub(" ", clean_title)
     clean_title = SEASON_RANGE_PATTERN.sub(" ", clean_title)
     clean_title = SEASON_EP_PATTERN.sub(" ", clean_title)
     clean_title = SEASON_SINGLE_PATTERN.sub(" ", clean_title)
     clean_title = EPISODE_RANGE_PATTERN.sub(" ", clean_title)
     clean_title = EPISODE_SINGLE_PATTERN.sub(" ", clean_title)
+    
     clean_title = re.sub(r"[._\[\]\(\)\-]+", " ", clean_title)
     clean_title = re.sub(r"\s+", " ", clean_title).strip().lower()
 

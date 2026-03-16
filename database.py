@@ -47,6 +47,11 @@ async def setup_indexes():
     await movies_col.create_index([("file_id", 1)], unique=True)
     await movies_col.create_index([("msg_id", 1)])
     await movies_col.create_index([("source_chat_id", 1)])
+    
+    # Filter specific indexes to prevent slow distinct() queries on high traffic
+    await movies_col.create_index([("languages", 1)])
+    await movies_col.create_index([("quality", 1)])
+    await movies_col.create_index([("season", 1)])
     print("Database indexes created successfully.")
 
 async def insert_movies_batch(movies_list):
@@ -74,6 +79,11 @@ def build_fuzzy_regex(query: str) -> str:
     query = (query or "").strip().lower()
     if not query:
         return ""
+    
+    # Security: Limit query length to prevent ReDoS and slow Mongo scans
+    if len(query) > 100:
+        query = query[:100]
+        
     escaped = re.escape(query)
     # Replace escaped separators with fuzzy wildcard blocks.
     pattern = re.sub(r"(?:\\\.|\\_|\\ )+", r".*", escaped)

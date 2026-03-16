@@ -1,46 +1,18 @@
-# Python bytecode and cache
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Virtual environments
 venv/
-.venv/
-env/
 ENV/
-
-# Local environment config
+env/
 .env
-.env.*
-!.env.example
 
-# Telegram/Pyrogram session artifacts
+# Pyrogram / Telegram
 *.session
 *.session-journal
 
-# Logs and runtime files
-*.log
+# Database / Local files
+/tmp/
+db_backups/
 logs/
-*.pid
-
-# Test and coverage artifacts
-.pytest_cache/
-.coverage
-coverage.xml
-htmlcov/
-
-# Build/package artifacts
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# IDE/editor files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
+config_local.py
