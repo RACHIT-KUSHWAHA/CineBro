@@ -29,21 +29,20 @@ app = Client("userbot_main", api_id=API_ID, api_hash=API_HASH, session_string=SE
 QUALITY_PATTERN = re.compile(r"\b(480p|720p|1080p|2160p|4k)\b", re.IGNORECASE)
 YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
 LANG_TOKEN_PATTERN = re.compile(
-    r"\b(dual(?:\s*audio)?|multi(?:\s*audio)?|hindi|english|tamil|telugu|malayalam|kannada|bengali|punjabi|marathi)\b",
+    r"(dual(?:\s*audio)?|multi(?:\s*audio)?|hindi|english|tamil|telugu|malayalam|kannada|bengali|punjabi|marathi)",
     re.IGNORECASE,
 )
 SEASON_RANGE_PATTERN = re.compile(
     r"\b(?:s(?:eason)?\s*0?(\d{1,2})\s*(?:to|\-|_)\s*0?(\d{1,2})|s0?(\d{1,2})\s*(?:to|\-|_)\s*0?(\d{1,2}))\b",
     re.IGNORECASE,
 )
-SEASON_EP_PATTERN = re.compile(r"\bs\s*0?(\d{1,2})\s*e(?:p(?:isode)?)?\s*0?\d{1,3}\b", re.IGNORECASE)
+SEASON_EP_PATTERN = re.compile(r"\bs(?:eason)?\s*0?(\d{1,2})\s*e(?:p(?:isode)?)?\s*0?(\d{1,3})\b", re.IGNORECASE)
 SEASON_SINGLE_PATTERN = re.compile(r"\b(?:season\s*0?(\d{1,2})|s\s*0?(\d{1,2}))\b", re.IGNORECASE)
-EPISODE_PATTERN = re.compile(
-    r"\b(?:e(?:p(?:isode)?)?\s*0?\d{1,3}(?:\s*(?:to|\-|_)\s*0?\d{1,3})?)\b",
-    re.IGNORECASE,
-)
+EPISODE_RANGE_PATTERN = re.compile(r"\be(?:p(?:isode)?)?\s*0?(\d{1,3})\s*(?:to|\-|_)\s*0?(\d{1,3})\b", re.IGNORECASE)
+EPISODE_SINGLE_PATTERN = re.compile(r"\be(?:p(?:isode)?)?\s*0?(\d{1,3})\b", re.IGNORECASE)
+
 NOISE_PATTERN = re.compile(
-    r"(@[a-zA-Z0-9_]+|mkv|mp4|avi|x264|x265|hevc|hdrip|web-?dl|webrip|bluray|aac|10bit|esub)",
+    r"(@[a-zA-Z0-9_]+|mkv|mp4|avi|x264|x265|hevc|hdrip|web-?dl|webrip|bluray|aac|10bit|esub|\b\d{4}\b)",
     re.IGNORECASE,
 )
 
@@ -57,25 +56,44 @@ def _normalize_lang_token(token: str) -> list[str]:
     return [t] if t else []
 
 
-def _extract_season(normalized_text: str) -> str:
+def _extract_season_and_ep(normalized_text: str) -> str:
+    season = ""
+    ep = ""
+    
+    se_match = SEASON_EP_PATTERN.search(normalized_text)
+    if se_match:
+        return f"S{int(se_match.group(1))} E{int(se_match.group(2))}"
+    
     range_match = SEASON_RANGE_PATTERN.search(normalized_text)
     if range_match:
         start = int(range_match.group(1) or range_match.group(3))
         end = int(range_match.group(2) or range_match.group(4))
+        start, end = min(start, end), max(start, end)
         if start == end:
             return f"S{start}"
-        if start > end:
-            start, end = end, start
         return f"S{start}-S{end}"
-
-    se_match = SEASON_EP_PATTERN.search(normalized_text)
-    if se_match:
-        return f"S{int(se_match.group(1))}"
-
+        
     single_match = SEASON_SINGLE_PATTERN.search(normalized_text)
     if single_match:
-        return f"S{int(single_match.group(1) or single_match.group(2))}"
-
+        season = f"S{int(single_match.group(1) or single_match.group(2))}"
+    
+    ep_range_match = EPISODE_RANGE_PATTERN.search(normalized_text)
+    if ep_range_match:
+        start = int(ep_range_match.group(1))
+        end = int(ep_range_match.group(2))
+        start, end = min(start, end), max(start, end)
+        if start == end:
+            ep = f"E{start}"
+        else:
+            ep = f"E{start}-E{end}"
+    else:
+        ep_single_match = EPISODE_SINGLE_PATTERN.search(normalized_text)
+        if ep_single_match:
+            ep = f"E{int(ep_single_match.group(1))}"
+            
+    if season and ep: return f"{season} {ep}"
+    if season: return season
+    if ep: return ep
     return ""
 
 
@@ -88,7 +106,7 @@ def parse_media_metadata(raw_text: str) -> dict:
     if quality == "4k":
         quality = "2160p"
 
-    season = _extract_season(normalized)
+    season = _extract_season_and_ep(normalized)
 
     langs = []
     for match in LANG_TOKEN_PATTERN.findall(normalized):
@@ -101,13 +119,17 @@ def parse_media_metadata(raw_text: str) -> dict:
 
     clean_title = text
     clean_title = YEAR_PATTERN.sub(" ", clean_title)
-    clean_title = LANG_TOKEN_PATTERN.sub(" ", clean_title)
+    
+    for mat in LANG_TOKEN_PATTERN.finditer(clean_title):
+        clean_title = clean_title.replace(mat.group(0), " ")
+        
     clean_title = NOISE_PATTERN.sub(" ", clean_title)
     clean_title = SEASON_RANGE_PATTERN.sub(" ", clean_title)
     clean_title = SEASON_EP_PATTERN.sub(" ", clean_title)
     clean_title = SEASON_SINGLE_PATTERN.sub(" ", clean_title)
-    clean_title = EPISODE_PATTERN.sub(" ", clean_title)
-    clean_title = re.sub(r"[\._\[\]\(\)\-]+", " ", clean_title)
+    clean_title = EPISODE_RANGE_PATTERN.sub(" ", clean_title)
+    clean_title = EPISODE_SINGLE_PATTERN.sub(" ", clean_title)
+    clean_title = re.sub(r"[._\[\]\(\)\-]+", " ", clean_title)
     clean_title = re.sub(r"\s+", " ", clean_title).strip().lower()
 
     return {
@@ -122,6 +144,8 @@ def parse_media_metadata(raw_text: str) -> dict:
 
 async def resolve_chat(client: Client, raw_chat: str):
     try:
+        if raw_chat.startswith("http") or "t.me" in raw_chat:
+            return await client.join_chat(raw_chat)
         return await client.get_chat(raw_chat)
     except PeerIdInvalid:
         return await client.join_chat(raw_chat)
@@ -297,6 +321,7 @@ async def clone_handler(client: Client, message: Message):
                     {"_id": 1},
                 )
                 if existing:
+                    print(f"[SKIP] '{raw_file_name}' already exists in DB.")
                     skipped_count += 1
                     if processed_media % 200 == 0:
                         try:

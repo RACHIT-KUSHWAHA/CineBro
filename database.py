@@ -133,6 +133,7 @@ async def search_movies(query: str, language: str = "", quality: str = "", limit
         "language": 1,
         "quality": 1,
         "size": 1,
+        "season": 1,
     }
 
     # Fetch a wider candidate set first, then apply Python fallback/sorting logic.

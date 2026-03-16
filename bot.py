@@ -60,7 +60,7 @@ def to_quality_label(value: str) -> str:
     if value == "all":
         return "All"
     if value == "unknown":
-        return "Unknown"
+        return "None"
     return value.upper()
 
 
@@ -72,6 +72,7 @@ def parse_language_string(raw_language: str) -> list:
 async def fetch_available_filters(base_query: dict):
     languages = set()
     qualities = set()
+    seasons = set()
 
     lang_list = await movies_col.distinct("languages", base_query)
     for lang in lang_list:
@@ -92,11 +93,22 @@ async def fetch_available_filters(base_query: dict):
     for qual in quality_values:
         if isinstance(qual, str):
             qualities.add(normalize_quality(qual))
+            
+    season_values = await movies_col.distinct("season", base_query)
+    for s in season_values:
+        if isinstance(s, str) and s.strip():
+            seasons.add(s.strip())
 
     lang_options = ["all"] + sorted([x for x in languages if x])
     quality_rank = {"2160p": 5, "1080p": 4, "720p": 3, "480p": 2, "unknown": 1}
     quality_options = ["all"] + sorted([x for x in qualities if x], key=lambda x: quality_rank.get(x, 0), reverse=True)
-    return lang_options, quality_options
+    
+    def season_key(x):
+        match = re.search(r'\d+', x)
+        return int(match.group()) if match else 999
+    season_options = ["all"] + sorted(list(seasons), key=season_key)
+    
+    return lang_options, quality_options, season_options
 
 
 def build_base_query(query_text: str) -> dict:
@@ -109,12 +121,13 @@ def build_base_query(query_text: str) -> dict:
     } if pattern else {"_id": None}
 
 
-def build_filter_query(base_query: dict, selected_lang: str, selected_quality: str) -> dict:
+def build_filter_query(base_query: dict, selected_lang: str, selected_quality: str, selected_season: str) -> dict:
     query = dict(base_query)
     filters_list = []
 
     lang = normalize_language(selected_lang)
     qual = normalize_quality(selected_quality)
+    season = (selected_season or "").strip()
 
     if lang and lang != "all":
         lang_regex = rf"(^|[\s,/|&]){re.escape(lang)}($|[\s,/|&])"
@@ -127,6 +140,9 @@ def build_filter_query(base_query: dict, selected_lang: str, selected_quality: s
 
     if qual and qual != "all":
         filters_list.append({"quality": qual})
+        
+    if season and season != "all":
+        filters_list.append({"season": season})
 
     if filters_list:
         if "$and" in query:
@@ -158,15 +174,18 @@ async def safe_copy_message(client: Client, chat_id: int, from_chat_id: int, mes
             await asyncio.sleep(flood.value + 1)
 
 
-async def fetch_page(query_text: str, page: int, selected_lang: str = "all", selected_quality: str = "all"):
+async def fetch_page(query_text: str, page: int, selected_lang: str = "all", selected_quality: str = "all", selected_season: str = "all"):
     base_query = build_base_query(query_text)
-    mongo_query = build_filter_query(base_query, selected_lang, selected_quality)
+    mongo_query = build_filter_query(base_query, selected_lang, selected_quality, selected_season)
     projection = {
         "title": 1,
         "clean_title": 1,
         "source_chat_id": 1,
         "msg_id": 1,
         "size": 1,
+        "season": 1,
+        "quality": 1,
+        "language": 1
     }
 
     total = await movies_col.count_documents(mongo_query)
@@ -175,27 +194,43 @@ async def fetch_page(query_text: str, page: int, selected_lang: str = "all", sel
     return movies, total
 
 
-def build_results_keyboard(session_id: str, page: int, selected_lang: str, selected_quality: str, movies: list, total: int) -> InlineKeyboardMarkup:
+def build_results_keyboard(session_id: str, page: int, selected_lang: str, selected_quality: str, selected_season: str, movies: list, total: int) -> InlineKeyboardMarkup:
     rows = []
 
     rows.append([
         InlineKeyboardButton(
-            text=f"🗣 Lang: {to_lang_label(selected_lang)}",
-            callback_data=f"lang|{session_id}|{page}|{selected_lang}|{selected_quality}",
+            text=f"🗣 {to_lang_label(selected_lang)}",
+            callback_data=f"lang|{session_id}|{page}|{selected_lang}|{selected_quality}|{selected_season}",
         ),
         InlineKeyboardButton(
-            text=f"📺 Qual: {to_quality_label(selected_quality)}",
-            callback_data=f"qual|{session_id}|{page}|{selected_lang}|{selected_quality}",
+            text=f"📺 {to_quality_label(selected_quality)}",
+            callback_data=f"qual|{session_id}|{page}|{selected_lang}|{selected_quality}|{selected_season}",
+        ),
+        InlineKeyboardButton(
+            text=f"🎞 {selected_season if selected_season != 'all' else 'All S'}",
+            callback_data=f"season|{session_id}|{page}|{selected_lang}|{selected_quality}|{selected_season}",
         ),
     ])
 
     for movie in movies:
         title = (movie.get("title") or movie.get("clean_title") or "Unknown").strip()
-        if len(title) > 52:
-            title = title[:49] + "..."
+        quality_label = to_quality_label(movie.get("quality", "unknown"))
+        season_val = movie.get("season", "")
+        
+        if season_val:
+            suffix = f" - {season_val} ({quality_label})"
+        else:
+            suffix = f" ({quality_label})"
+            
+        max_title_len = 59 - len(suffix)
+        if len(title) > max_title_len:
+            title = title[:max_title_len - 3] + "..."
+            
+        btn_text = f"{title}{suffix}"
+        
         rows.append([
             InlineKeyboardButton(
-                text=title,
+                text=btn_text,
                 callback_data=f"send_file|{str(movie.get('_id'))}|{session_id}",
             )
         ])
@@ -204,11 +239,11 @@ def build_results_keyboard(session_id: str, page: int, selected_lang: str, selec
     nav_buttons = []
     if page > 0:
         nav_buttons.append(
-            InlineKeyboardButton("⬅️ Prev", callback_data=f"page|{session_id}|{page - 1}|{selected_lang}|{selected_quality}")
+            InlineKeyboardButton("⬅️ Prev", callback_data=f"page|{session_id}|{page - 1}|{selected_lang}|{selected_quality}|{selected_season}")
         )
     if page < max_page:
         nav_buttons.append(
-            InlineKeyboardButton("Next ➡️", callback_data=f"page|{session_id}|{page + 1}|{selected_lang}|{selected_quality}")
+            InlineKeyboardButton("Next ➡️", callback_data=f"page|{session_id}|{page + 1}|{selected_lang}|{selected_quality}|{selected_season}")
         )
 
     if nav_buttons:
@@ -248,7 +283,7 @@ async def search_and_deliver(client: Client, message: Message):
 
     try:
         base_query = build_base_query(query_text)
-        lang_options, quality_options = await fetch_available_filters(base_query)
+        lang_options, quality_options, season_options = await fetch_available_filters(base_query)
 
         session_id = uuid.uuid4().hex[:10]
         clear_old_sessions()
@@ -256,18 +291,20 @@ async def search_and_deliver(client: Client, message: Message):
             "query": query_text,
             "lang_options": lang_options,
             "quality_options": quality_options,
+            "season_options": season_options,
             "ts": time.time(),
         }
 
         selected_lang = "all"
         selected_quality = "all"
-        movies, total = await fetch_page(query_text, 0, selected_lang, selected_quality)
+        selected_season = "all"
+        movies, total = await fetch_page(query_text, 0, selected_lang, selected_quality, selected_season)
         if not movies:
             await searching_message.edit_text("😕 Sorry, I couldn't find anything for that query. Try a slightly different name.")
             return
 
         max_page = (total - 1) // PAGE_SIZE if total else 0
-        keyboard = build_results_keyboard(session_id, 0, selected_lang, selected_quality, movies, total)
+        keyboard = build_results_keyboard(session_id, 0, selected_lang, selected_quality, selected_season, movies, total)
         await searching_message.edit_text(
             f"<b>Results for:</b> {query_text}\n"
             f"<b>Page:</b> 1/{max_page + 1}\n"
@@ -305,8 +342,23 @@ async def callback_router(client: Client, call: CallbackQuery):
             return
 
         title = movie.get("title") or movie.get("clean_title") or "Unknown"
+        season_val = movie.get("season", "")
+        quality_val = movie.get("quality", "unknown")
+        language_val = movie.get("language", "unknown")
         size = format_size(movie.get("size", 0))
-        caption = f"<b>Title:</b> {title}\n<b>Size:</b> {size}"
+        
+        caption_lines = [
+            f"🎬 <b>Title:</b> {title}"
+        ]
+        if season_val:
+            caption_lines.append(f"📺 <b>Season:</b> {season_val}")
+        if quality_val and quality_val != "unknown":
+            caption_lines.append(f"💿 <b>Quality:</b> {to_quality_label(quality_val)}")
+        if language_val and language_val != "unknown":
+            caption_lines.append(f"🗣 <b>Language:</b> {language_val.title()}")
+        caption_lines.append(f"💾 <b>Size:</b> {size}")
+        
+        caption = "\n".join(caption_lines)
 
         try:
             await safe_copy_message(
@@ -323,8 +375,8 @@ async def callback_router(client: Client, call: CallbackQuery):
         return
 
     if data.startswith("page|"):
-        parts = data.split("|", 4)
-        if len(parts) != 5:
+        parts = data.split("|", 5)
+        if len(parts) != 6:
             await call.answer("Invalid page request.", show_alert=True)
             return
 
@@ -339,6 +391,8 @@ async def callback_router(client: Client, call: CallbackQuery):
 
         selected_lang = normalize_language(parts[3]) or "all"
         selected_quality = normalize_quality(parts[4]) or "all"
+        selected_season = parts[5] or "all"
+        
         session = SEARCH_SESSIONS.get(session_id)
         if not session:
             await call.answer("Search expired. Please search again.", show_alert=True)
@@ -346,13 +400,13 @@ async def callback_router(client: Client, call: CallbackQuery):
 
         query_text = session.get("query", "")
         try:
-            movies, total = await fetch_page(query_text, page, selected_lang, selected_quality)
+            movies, total = await fetch_page(query_text, page, selected_lang, selected_quality, selected_season)
             if not movies:
                 await call.answer("No more results.", show_alert=True)
                 return
 
             max_page = (total - 1) // PAGE_SIZE if total else 0
-            keyboard = build_results_keyboard(session_id, page, selected_lang, selected_quality, movies, total)
+            keyboard = build_results_keyboard(session_id, page, selected_lang, selected_quality, selected_season, movies, total)
             await call.message.edit_text(
                 f"<b>Results for:</b> {query_text}\n"
                 f"<b>Page:</b> {page + 1}/{max_page + 1}\n"
@@ -365,9 +419,9 @@ async def callback_router(client: Client, call: CallbackQuery):
             await call.message.reply_text(f"❌ Pagination error: {exc}")
         return
 
-    if data.startswith("lang|") or data.startswith("qual|"):
-        parts = data.split("|", 4)
-        if len(parts) != 5:
+    if data.startswith("lang|") or data.startswith("qual|") or data.startswith("season|"):
+        parts = data.split("|", 5)
+        if len(parts) != 6:
             await call.answer("Invalid filter request.", show_alert=True)
             return
 
@@ -377,8 +431,10 @@ async def callback_router(client: Client, call: CallbackQuery):
             page = int(parts[2])
         except ValueError:
             page = 0
+            
         selected_lang = normalize_language(parts[3]) or "all"
         selected_quality = normalize_quality(parts[4]) or "all"
+        selected_season = parts[5] or "all"
 
         session = SEARCH_SESSIONS.get(session_id)
         if not session:
@@ -387,28 +443,35 @@ async def callback_router(client: Client, call: CallbackQuery):
 
         lang_options = session.get("lang_options", ["all"])
         quality_options = session.get("quality_options", ["all"])
+        season_options = session.get("season_options", ["all"])
+        
         if "all" not in lang_options:
             lang_options = ["all"] + lang_options
         if "all" not in quality_options:
             quality_options = ["all"] + quality_options
+        if "all" not in season_options:
+            season_options = ["all"] + season_options
 
         if action == "lang":
             selected_lang = cycle_option(selected_lang, lang_options)
             page = 0
-        else:
+        elif action == "qual":
             selected_quality = cycle_option(selected_quality, quality_options)
+            page = 0
+        elif action == "season":
+            selected_season = cycle_option(selected_season, season_options)
             page = 0
 
         query_text = session.get("query", "")
 
         try:
-            movies, total = await fetch_page(query_text, page, selected_lang, selected_quality)
+            movies, total = await fetch_page(query_text, page, selected_lang, selected_quality, selected_season)
             if not movies:
-                await call.answer("❌ Not available in this Language/Quality", show_alert=True)
+                await call.answer("❌ Not available in this Language/Quality/Season", show_alert=True)
                 return
 
             max_page = (total - 1) // PAGE_SIZE if total else 0
-            keyboard = build_results_keyboard(session_id, page, selected_lang, selected_quality, movies, total)
+            keyboard = build_results_keyboard(session_id, page, selected_lang, selected_quality, selected_season, movies, total)
             await call.message.edit_text(
                 f"<b>Results for:</b> {query_text}\n"
                 f"<b>Page:</b> {page + 1}/{max_page + 1}\n"
