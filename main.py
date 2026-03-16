@@ -1,11 +1,11 @@
 import asyncio
+import re
 import time
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait, PeerIdInvalid, ChannelPrivate, InviteHashInvalid
+from pyrogram.errors import FloodWait, PeerIdInvalid
 import config
-from indexer import extract_metadata
-from database import upsert_movie_document, flush_movies_collection, get_total_movies_count, setup_indexes
+from database import upsert_movie_document, flush_movies_collection, get_total_movies_count, setup_indexes, movies_col
 
 # Global start time for uptime
 start_time = time.time()
@@ -25,6 +25,114 @@ SESSION_STRING = _require_str("SESSION_STRING", config.SESSION_STRING)
 ADMIN_ID = _require_int("ADMIN_ID", config.ADMIN_ID)
 
 app = Client("userbot_main", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+
+QUALITY_PATTERN = re.compile(r"\b(480p|720p|1080p|2160p|4k)\b", re.IGNORECASE)
+YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
+LANG_TOKEN_PATTERN = re.compile(
+    r"\b(dual(?:\s*audio)?|multi(?:\s*audio)?|hindi|english|tamil|telugu|malayalam|kannada|bengali|punjabi|marathi)\b",
+    re.IGNORECASE,
+)
+SEASON_RANGE_PATTERN = re.compile(
+    r"\b(?:s(?:eason)?\s*0?(\d{1,2})\s*(?:to|\-|_)\s*0?(\d{1,2})|s0?(\d{1,2})\s*(?:to|\-|_)\s*0?(\d{1,2}))\b",
+    re.IGNORECASE,
+)
+SEASON_EP_PATTERN = re.compile(r"\bs\s*0?(\d{1,2})\s*e(?:p(?:isode)?)?\s*0?\d{1,3}\b", re.IGNORECASE)
+SEASON_SINGLE_PATTERN = re.compile(r"\b(?:season\s*0?(\d{1,2})|s\s*0?(\d{1,2}))\b", re.IGNORECASE)
+EPISODE_PATTERN = re.compile(
+    r"\b(?:e(?:p(?:isode)?)?\s*0?\d{1,3}(?:\s*(?:to|\-|_)\s*0?\d{1,3})?)\b",
+    re.IGNORECASE,
+)
+NOISE_PATTERN = re.compile(
+    r"(@[a-zA-Z0-9_]+|mkv|mp4|avi|x264|x265|hevc|hdrip|web-?dl|webrip|bluray|aac|10bit|esub)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_lang_token(token: str) -> list[str]:
+    t = re.sub(r"\s+", " ", (token or "").strip().lower())
+    if t in {"dual", "dual audio"}:
+        return ["hindi", "english"]
+    if t in {"multi", "multi audio"}:
+        return ["multi"]
+    return [t] if t else []
+
+
+def _extract_season(normalized_text: str) -> str:
+    range_match = SEASON_RANGE_PATTERN.search(normalized_text)
+    if range_match:
+        start = int(range_match.group(1) or range_match.group(3))
+        end = int(range_match.group(2) or range_match.group(4))
+        if start == end:
+            return f"S{start}"
+        if start > end:
+            start, end = end, start
+        return f"S{start}-S{end}"
+
+    se_match = SEASON_EP_PATTERN.search(normalized_text)
+    if se_match:
+        return f"S{int(se_match.group(1))}"
+
+    single_match = SEASON_SINGLE_PATTERN.search(normalized_text)
+    if single_match:
+        return f"S{int(single_match.group(1) or single_match.group(2))}"
+
+    return ""
+
+
+def parse_media_metadata(raw_text: str) -> dict:
+    text = (raw_text or "").strip()
+    normalized = re.sub(r"[._]", " ", text)
+
+    quality_match = QUALITY_PATTERN.search(normalized)
+    quality = quality_match.group(1).lower() if quality_match else "unknown"
+    if quality == "4k":
+        quality = "2160p"
+
+    season = _extract_season(normalized)
+
+    langs = []
+    for match in LANG_TOKEN_PATTERN.findall(normalized):
+        for item in _normalize_lang_token(match):
+            if item and item not in langs:
+                langs.append(item)
+
+    year_match = YEAR_PATTERN.search(normalized)
+    year = int(year_match.group(1)) if year_match else 0
+
+    clean_title = text
+    clean_title = YEAR_PATTERN.sub(" ", clean_title)
+    clean_title = LANG_TOKEN_PATTERN.sub(" ", clean_title)
+    clean_title = NOISE_PATTERN.sub(" ", clean_title)
+    clean_title = SEASON_RANGE_PATTERN.sub(" ", clean_title)
+    clean_title = SEASON_EP_PATTERN.sub(" ", clean_title)
+    clean_title = SEASON_SINGLE_PATTERN.sub(" ", clean_title)
+    clean_title = EPISODE_PATTERN.sub(" ", clean_title)
+    clean_title = re.sub(r"[\._\[\]\(\)\-]+", " ", clean_title)
+    clean_title = re.sub(r"\s+", " ", clean_title).strip().lower()
+
+    return {
+        "quality": quality,
+        "languages": langs,
+        "language": " ".join(langs) if langs else "unknown",
+        "season": season,
+        "year": year,
+        "clean_title": clean_title,
+    }
+
+
+async def resolve_chat(client: Client, raw_chat: str):
+    try:
+        return await client.get_chat(raw_chat)
+    except PeerIdInvalid:
+        return await client.join_chat(raw_chat)
+
+
+async def safe_copy_message(client: Client, dest_chat_id: int, src_chat_id: int, src_msg_id: int):
+    while True:
+        try:
+            return await client.copy_message(dest_chat_id, src_chat_id, src_msg_id)
+        except FloodWait as flood:
+            await asyncio.sleep(flood.value + 2)
 
 @app.on_message(filters.all, group=-100)
 async def log_every_message(_: Client, message: Message):
@@ -49,6 +157,28 @@ async def status_handler(client, message):
     except Exception as e:
         await message.reply_text(f"❌ Error: {e}")
 
+
+@app.on_message(filters.command("help", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def help_handler(client: Client, message: Message):
+    try:
+        help_text = (
+            "<b>📘 CineBro Userbot Commands</b>\n\n"
+            "<b>1. .index &lt;source_chat_id_or_username&gt;</b>\n"
+            "Indexes media from a source chat into MongoDB.\n"
+            "<i>Example:</i> <code>.index -1001234567890</code>\n\n"
+            "<b>2. .clone &lt;source_chat_id&gt; &lt;dest_chat_id&gt;</b>\n"
+            "Stealth-clones media with safe delay and stores new pointers in DB.\n"
+            "<i>Example:</i> <code>.clone -1001111111111 -1002222222222</code>\n\n"
+            "<b>3. .status</b>\n"
+            "Shows CPU, RAM, uptime, and total indexed movies.\n\n"
+            "<b>4. .flush</b>\n"
+            "Clears the movies collection safely.\n"
+            "<i>Example:</i> <code>.flush</code>"
+        )
+        await message.reply_text(help_text)
+    except Exception as e:
+        await message.reply_text(f"❌ Error while showing help: {e}")
+
 @app.on_message(filters.command("index", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
 async def index_handler(client, message):
     try:
@@ -58,64 +188,169 @@ async def index_handler(client, message):
         raw_chat = message.command[1]
         msg = await message.reply_text("<b>🔍 Trying to resolve Peer...</b>")
 
-        # PEER RESOLUTION LOGIC
         try:
-            chat = await client.get_chat(raw_chat)
-        except PeerIdInvalid:
-            await msg.edit("<b>⚠️ Peer unknown. Trying to join...</b>")
-            try:
-                # Agar private channel hai toh link se join karne ki koshish karega
-                chat = await client.join_chat(raw_chat)
-            except Exception as e:
-                return await msg.edit(f"<b>❌ Failed to join:</b> {e}\nJoin the channel manually first!")
+            chat = await resolve_chat(client, raw_chat)
+        except Exception as e:
+            return await msg.edit(f"<b>❌ Failed to resolve source chat:</b> {e}")
 
         await msg.edit(f"<b>📂 Indexing: {chat.title}</b>\n<i>Please wait...</i>")
 
         processed_count = 0
         upserted_count = 0
+        failed_count = 0
         async for user_msg in client.get_chat_history(chat.id):
-            media = user_msg.document or user_msg.video
-            if not media:
+            try:
+                media = user_msg.document or user_msg.video
+                if not media:
+                    continue
+
+                raw_text = getattr(media, "file_name", "") or getattr(user_msg, "caption", "") or ""
+                metadata = parse_media_metadata(raw_text)
+                movie_doc = {
+                    "file_id": media.file_id,
+                    "raw_file_name": getattr(media, "file_name", "") or raw_text,
+                    "msg_id": user_msg.id,
+                    "source_chat_id": chat.id,
+                    "title": raw_text,
+                    "clean_title": metadata["clean_title"],
+                    "size": getattr(media, "file_size", 0),
+                    "quality": metadata["quality"],
+                    "language": metadata["language"],
+                    "languages": metadata["languages"],
+                    "season": metadata["season"],
+                    "year": metadata["year"],
+                }
+
+                await upsert_movie_document(movie_doc)
+                processed_count += 1
+                upserted_count += 1
+
+                if processed_count % 200 == 0:
+                    try:
+                        await msg.edit(
+                            f"<b>⏳ Indexed {processed_count} files in {chat.title}...</b>"
+                        )
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 1)
+
+                await asyncio.sleep(0.05)
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 1)
+            except Exception:
+                failed_count += 1
                 continue
-
-            raw_text = getattr(media, "file_name", "") or getattr(user_msg, "caption", "") or ""
-            metadata = extract_metadata(raw_text)
-            movie_doc = {
-                "file_id": media.file_id,
-                "msg_id": user_msg.id,
-                "source_chat_id": chat.id,
-                "title": raw_text,
-                "clean_title": metadata["clean_title"],
-                "size": getattr(media, "file_size", 0),
-                "quality": metadata["quality"],
-                "language": metadata["language"],
-                "year": metadata["year"],
-            }
-
-            await upsert_movie_document(movie_doc)
-            processed_count += 1
-            upserted_count += 1
-
-            if processed_count % 100 == 0:
-                try:
-                    await msg.edit(
-                        f"<b>⏳ Processed {processed_count} files in {chat.title}...</b>"
-                    )
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
-
-            # Critical throttle to keep CPU stable during long indexing loops.
-            await asyncio.sleep(0.05)
 
         await msg.edit(
             "<b>✅ Indexing Complete!</b>\n"
             f"<b>Total Processed:</b> {processed_count}\n"
-            f"<b>Total Upserted:</b> {upserted_count}"
+            f"<b>Total Upserted:</b> {upserted_count}\n"
+            f"<b>Failed:</b> {failed_count}"
         )
 
     except Exception as e:
-        print(f"[ERROR] Indexing failed: {e}")
-        await message.reply_text(f"❌ Indexing Error: {e}")
+        await message.reply_text(f"❌ Error during indexing: {e}")
+
+
+@app.on_message(filters.command("clone", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def clone_handler(client: Client, message: Message):
+    try:
+        if len(message.command) < 3:
+            return await message.reply_text("❌ Usage: <code>.clone &lt;source_chat_id&gt; &lt;dest_chat_id&gt;</code>")
+
+        raw_source = message.command[1]
+        raw_dest = message.command[2]
+        progress = await message.reply_text("<b>🔄 Initializing clone process...</b>")
+
+        try:
+            source_chat = await resolve_chat(client, raw_source)
+            dest_chat = await resolve_chat(client, raw_dest)
+        except Exception as e:
+            return await progress.edit(f"❌ Error resolving chats: {e}")
+
+        await progress.edit(
+            f"<b>📥 Source:</b> {source_chat.title}\n"
+            f"<b>📤 Destination:</b> {dest_chat.title}\n"
+            "<i>Cloning started...</i>"
+        )
+
+        cloned_count = 0
+        skipped_count = 0
+        failed_count = 0
+        processed_media = 0
+
+        async for src_msg in client.get_chat_history(source_chat.id):
+            media = src_msg.document or src_msg.video
+            if not media:
+                continue
+
+            try:
+                processed_media += 1
+                raw_text = getattr(media, "file_name", "") or getattr(src_msg, "caption", "") or ""
+                raw_file_name = (getattr(media, "file_name", "") or raw_text).strip()
+                file_size = int(getattr(media, "file_size", 0) or 0)
+
+                existing = await movies_col.find_one(
+                    {
+                        "raw_file_name": raw_file_name,
+                        "size": file_size,
+                    },
+                    {"_id": 1},
+                )
+                if existing:
+                    skipped_count += 1
+                    if processed_media % 200 == 0:
+                        try:
+                            await progress.edit(
+                                f"⏳ Processed {processed_media} files...\n"
+                                f"✅ Cloned: {cloned_count}\n"
+                                f"⏭ Skipped: {skipped_count}"
+                            )
+                        except FloodWait as e:
+                            await asyncio.sleep(e.value + 1)
+                    continue
+
+                await asyncio.sleep(2.5)
+                copied_msg = await safe_copy_message(client, dest_chat.id, source_chat.id, src_msg.id)
+
+                metadata = parse_media_metadata(raw_text)
+                movie_doc = {
+                    "file_id": media.file_id,
+                    "raw_file_name": raw_file_name,
+                    "msg_id": copied_msg.id,
+                    "source_chat_id": dest_chat.id,
+                    "title": raw_text,
+                    "clean_title": metadata["clean_title"],
+                    "size": getattr(media, "file_size", 0),
+                    "quality": metadata["quality"],
+                    "language": metadata["language"],
+                    "languages": metadata["languages"],
+                    "season": metadata["season"],
+                    "year": metadata["year"],
+                }
+                await upsert_movie_document(movie_doc)
+                cloned_count += 1
+
+                if processed_media % 200 == 0:
+                    try:
+                        await progress.edit(
+                            f"⏳ Processed {processed_media} files...\n"
+                            f"✅ Cloned: {cloned_count}\n"
+                            f"⏭ Skipped: {skipped_count}"
+                        )
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 1)
+            except Exception:
+                failed_count += 1
+                continue
+
+        await progress.edit(
+            "<b>✅ Clone Complete!</b>\n"
+            f"<b>Cloned:</b> {cloned_count}\n"
+            f"<b>Skipped:</b> {skipped_count}\n"
+            f"<b>Failed:</b> {failed_count}"
+        )
+    except Exception as e:
+        await message.reply_text(f"❌ Error during cloning: {e}")
 
 @app.on_message(filters.command("flush", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
 async def flush_db(client, message):
