@@ -187,21 +187,33 @@ async def help_handler(client: Client, message: Message):
     try:
         help_text = (
             "<b>📘 CineBro Userbot Commands</b>\n\n"
-            "<b>1. .index &lt;source_chat_id_or_username&gt;</b>\n"
-            "Indexes media from a source chat into MongoDB.\n"
-            "<i>Example:</i> <code>.index -1001234567890</code>\n\n"
-            "<b>2. .clone &lt;source_chat_id&gt; &lt;dest_chat_id&gt;</b>\n"
-            "Stealth-clones media with safe delay and stores new pointers in DB.\n"
-            "<i>Example:</i> <code>.clone -1001111111111 -1002222222222</code>\n\n"
-            "<b>3. .status</b>\n"
-            "Shows CPU, RAM, uptime, and total indexed movies.\n\n"
-            "<b>4. .flush</b>\n"
-            "Clears the movies collection safely.\n"
-            "<i>Example:</i> <code>.flush</code>"
+            "<b>1. .index &lt;chat_id&gt;</b> - Index media from chat\n"
+            "<b>2. .clone &lt;src&gt; &lt;dest&gt;</b> - Clone entire chat\n"
+            "<b>3. .clone_one &lt;src&gt; &lt;dest&gt; &lt;msg_id&gt;</b> - Clone specific message\n"
+            "<b>4. .id</b> - Reply to msg to get ID, or use in chat to get chat ID\n"
+            "<b>5. .status</b> - Show bot status\n"
+            "<b>6. .flush</b> - Clear database"
         )
         await message.reply_text(help_text)
     except Exception as e:
         await message.reply_text(f"❌ Error while showing help: {e}")
+
+@app.on_message(filters.command("id", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def id_handler(client: Client, message: Message):
+    try:
+        if message.reply_to_message:
+            target = message.reply_to_message
+            if target.from_user:
+                await message.reply_text(f"<b>User ID:</b> <code>{target.from_user.id}</code>")
+            elif target.sender_chat:
+                await message.reply_text(f"<b>Channel/Group ID:</b> <code>{target.sender_chat.id}</code>")
+            else:
+                await message.reply_text("<b>ID:</b> Unknown")
+        else:
+            await message.reply_text(f"<b>Current Chat ID:</b> <code>{message.chat.id}</code>\n<b>Your ID:</b> <code>{message.from_user.id}</code>")
+    except Exception as e:
+        await message.reply_text(f"❌ Error getting ID: {e}")
+
 
 @app.on_message(filters.command("index", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
 async def index_handler(client, message):
@@ -397,4 +409,63 @@ if __name__ == "__main__":
     try:
         app.run(main())
     except Exception as e:
-        print(f"[FATAL] {e}")
+        print(f"[FATAL] {e}")@app.on_message(filters.command("clone_one", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def clone_one_handler(client: Client, message: Message):
+    try:
+        if len(message.command) < 4:
+            return await message.reply_text("❌ Usage: <code>.clone_one &lt;source_chat_id&gt; &lt;dest_chat_id&gt; &lt;msg_id&gt;</code>")
+
+        raw_source = message.command[1]
+        raw_dest = message.command[2]
+        msg_id = int(message.command[3])
+        
+        progress = await message.reply_text("<b>🔄 Initializing clone_one process...</b>")
+
+        try:
+            source_chat = await resolve_chat(client, raw_source)
+            dest_chat = await resolve_chat(client, raw_dest)
+        except Exception as e:
+            return await progress.edit(f"❌ Error resolving chats: {e}")
+
+        src_msg = await client.get_messages(source_chat.id, msg_id)
+        if not src_msg or not (src_msg.document or src_msg.video):
+            return await progress.edit("❌ Message not found or does not contain media.")
+
+        media = src_msg.document or src_msg.video
+        raw_text = getattr(media, "file_name", "") or getattr(src_msg, "caption", "") or ""
+        raw_file_name = (getattr(media, "file_name", "") or raw_text).strip()
+        file_size = int(getattr(media, "file_size", 0) or 0)
+
+        existing = await movies_col.find_one(
+            {
+                "raw_file_name": raw_file_name,
+                "size": file_size,
+            },
+            {"_id": 1},
+        )
+        if existing:
+            return await progress.edit(f"❌ File '{raw_file_name}' already exists in DB (Skipped).")
+
+        copied_msg = await safe_copy_message(client, dest_chat.id, source_chat.id, src_msg.id)
+
+        metadata = parse_media_metadata(raw_text)
+        movie_doc = {
+            "file_id": media.file_id,
+            "raw_file_name": raw_file_name,
+            "msg_id": copied_msg.id,
+            "source_chat_id": dest_chat.id,
+            "title": raw_text,
+            "clean_title": metadata["clean_title"],
+            "size": getattr(media, "file_size", 0),
+            "quality": metadata["quality"],
+            "language": metadata["language"],
+            "languages": metadata["languages"],
+            "season": metadata["season"],
+            "year": metadata["year"],
+        }
+        await upsert_movie_document(movie_doc)
+        
+        await progress.edit("<b>✅ Clone One Complete!</b>\nFile successfully cloned and indexed.")
+    except Exception as e:
+        await message.reply_text(f"❌ Error during clone_one: {e}")
+

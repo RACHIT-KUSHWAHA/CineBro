@@ -1,13 +1,14 @@
 import asyncio
 import re
 import time
-import uuid
+import os
+import psutil
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 import config
 from bson import ObjectId
-from database import setup_indexes, build_fuzzy_regex, movies_col
+from database import build_fuzzy_regex, movies_col, add_user, get_all_users, get_total_users_count, get_total_movies_count
 from utils import is_rate_limited
 
 
@@ -24,92 +25,7 @@ def format_size(size_bytes: int) -> str:
 
 
 PAGE_SIZE = 10
-SESSION_TTL_SECONDS = 1800
-MAX_SESSION_CACHE = 5000
-
-SEARCH_SESSIONS = {}
-
-
-def clear_old_sessions() -> None:
-    now = time.time()
-    if len(SEARCH_SESSIONS) <= MAX_SESSION_CACHE:
-        return
-    stale_keys = [k for k, v in SEARCH_SESSIONS.items() if now - v.get("ts", now) > SESSION_TTL_SECONDS]
-    for key in stale_keys:
-        del SEARCH_SESSIONS[key]
-
-
-def normalize_quality(value: str) -> str:
-    q = (value or "").strip().lower()
-    return "2160p" if q == "4k" else (q or "unknown")
-
-
-def normalize_language(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip().lower())
-
-
-def to_lang_label(value: str) -> str:
-    if value == "all":
-        return "All"
-    if value == "multi":
-        return "Multi"
-    return value.title()
-
-
-def to_quality_label(value: str) -> str:
-    if value == "all":
-        return "All"
-    if value == "unknown":
-        return "None"
-    return value.upper()
-
-
-def parse_language_string(raw_language: str) -> list:
-    parts = [x.strip().lower() for x in re.split(r"[\s,/|&]+", raw_language or "") if x.strip()]
-    return parts
-
-
-async def fetch_available_filters(base_query: dict):
-    languages = set()
-    qualities = set()
-    seasons = set()
-
-    lang_list = await movies_col.distinct("languages", base_query)
-    for lang in lang_list:
-        if isinstance(lang, str):
-            val = normalize_language(lang)
-            if val:
-                languages.add(val)
-
-    if not languages:
-        language_field_values = await movies_col.distinct("language", base_query)
-        for raw in language_field_values:
-            if not isinstance(raw, str):
-                continue
-            for token in parse_language_string(raw):
-                languages.add(token)
-
-    quality_values = await movies_col.distinct("quality", base_query)
-    for qual in quality_values:
-        if isinstance(qual, str):
-            qualities.add(normalize_quality(qual))
-            
-    season_values = await movies_col.distinct("season", base_query)
-    for s in season_values:
-        if isinstance(s, str) and s.strip():
-            seasons.add(s.strip())
-
-    lang_options = ["all"] + sorted([x for x in languages if x])
-    quality_rank = {"2160p": 5, "1080p": 4, "720p": 3, "480p": 2, "unknown": 1}
-    quality_options = ["all"] + sorted([x for x in qualities if x], key=lambda x: quality_rank.get(x, 0), reverse=True)
-    
-    def season_key(x):
-        match = re.search(r'\d+', x)
-        return int(match.group()) if match else 999
-    season_options = ["all"] + sorted(list(seasons), key=season_key)
-    
-    return lang_options, quality_options, season_options
-
+start_time = time.time()
 
 def build_base_query(query_text: str) -> dict:
     pattern = build_fuzzy_regex(query_text)
@@ -121,47 +37,7 @@ def build_base_query(query_text: str) -> dict:
     } if pattern else {"_id": None}
 
 
-def build_filter_query(base_query: dict, selected_lang: str, selected_quality: str, selected_season: str) -> dict:
-    query = dict(base_query)
-    filters_list = []
-
-    lang = normalize_language(selected_lang)
-    qual = normalize_quality(selected_quality)
-    season = (selected_season or "").strip()
-
-    if lang and lang != "all":
-        lang_regex = rf"(^|[\s,/|&]){re.escape(lang)}($|[\s,/|&])"
-        filters_list.append({
-            "$or": [
-                {"languages": lang},
-                {"language": {"$regex": lang_regex, "$options": "i"}},
-            ]
-        })
-
-    if qual and qual != "all":
-        filters_list.append({"quality": qual})
-        
-    if season and season != "all":
-        filters_list.append({"season": season})
-
-    if filters_list:
-        if "$and" in query:
-            query["$and"].extend(filters_list)
-        else:
-            query["$and"] = filters_list
-    return query
-
-
-def cycle_option(current: str, options: list) -> str:
-    if not options:
-        return "all"
-    if current not in options:
-        return options[0]
-    idx = options.index(current)
-    return options[(idx + 1) % len(options)]
-
-
-async def safe_copy_message(client: Client, chat_id: int, from_chat_id: int, message_id: int, caption: str):
+async def safe_copy_message(client: Client, chat_id: int, from_chat_id: int, message_id: int, caption: str, reply_markup=None):
     while True:
         try:
             return await client.copy_message(
@@ -169,14 +45,14 @@ async def safe_copy_message(client: Client, chat_id: int, from_chat_id: int, mes
                 from_chat_id=from_chat_id,
                 message_id=message_id,
                 caption=caption,
+                reply_markup=reply_markup
             )
         except FloodWait as flood:
             await asyncio.sleep(flood.value + 1)
 
 
-async def fetch_page(query_text: str, page: int, selected_lang: str = "all", selected_quality: str = "all", selected_season: str = "all"):
+async def fetch_page(query_text: str, page: int):
     base_query = build_base_query(query_text)
-    mongo_query = build_filter_query(base_query, selected_lang, selected_quality, selected_season)
     projection = {
         "title": 1,
         "clean_title": 1,
@@ -188,33 +64,19 @@ async def fetch_page(query_text: str, page: int, selected_lang: str = "all", sel
         "language": 1
     }
 
-    total = await movies_col.count_documents(mongo_query)
-    cursor = movies_col.find(mongo_query, projection).skip(page * PAGE_SIZE).limit(PAGE_SIZE)
+    total = await movies_col.count_documents(base_query)
+    cursor = movies_col.find(base_query, projection).skip(page * PAGE_SIZE).limit(PAGE_SIZE)
     movies = await cursor.to_list(length=PAGE_SIZE)
     return movies, total
 
 
-def build_results_keyboard(session_id: str, page: int, selected_lang: str, selected_quality: str, selected_season: str, movies: list, total: int) -> InlineKeyboardMarkup:
+def build_results_keyboard(query_text: str, page: int, movies: list, total: int) -> InlineKeyboardMarkup:
     rows = []
-
-    rows.append([
-        InlineKeyboardButton(
-            text=f"🗣 {to_lang_label(selected_lang)}",
-            callback_data=f"lang|{session_id}|{page}|{selected_lang}|{selected_quality}|{selected_season}",
-        ),
-        InlineKeyboardButton(
-            text=f"📺 {to_quality_label(selected_quality)}",
-            callback_data=f"qual|{session_id}|{page}|{selected_lang}|{selected_quality}|{selected_season}",
-        ),
-        InlineKeyboardButton(
-            text=f"🎞 {selected_season if selected_season != 'all' else 'All S'}",
-            callback_data=f"season|{session_id}|{page}|{selected_lang}|{selected_quality}|{selected_season}",
-        ),
-    ])
 
     for movie in movies:
         title = (movie.get("title") or movie.get("clean_title") or "Unknown").strip()
-        quality_label = to_quality_label(movie.get("quality", "unknown"))
+        quality_label = str(movie.get("quality", "unknown")).upper()
+        if quality_label == "UNKNOWN": quality_label = "None"
         season_val = movie.get("season", "")
         
         if season_val:
@@ -231,7 +93,7 @@ def build_results_keyboard(session_id: str, page: int, selected_lang: str, selec
         rows.append([
             InlineKeyboardButton(
                 text=btn_text,
-                callback_data=f"send_file|{str(movie.get('_id'))}|{session_id}",
+                callback_data=f"send_file|{str(movie.get('_id'))}",
             )
         ])
 
@@ -239,15 +101,21 @@ def build_results_keyboard(session_id: str, page: int, selected_lang: str, selec
     nav_buttons = []
     if page > 0:
         nav_buttons.append(
-            InlineKeyboardButton("⬅️ Prev", callback_data=f"page|{session_id}|{page - 1}|{selected_lang}|{selected_quality}|{selected_season}")
+            InlineKeyboardButton("⬅️ Prev", callback_data=f"page|{query_text[:40]}|{page - 1}")
         )
     if page < max_page:
         nav_buttons.append(
-            InlineKeyboardButton("Next ➡️", callback_data=f"page|{session_id}|{page + 1}|{selected_lang}|{selected_quality}|{selected_season}")
+            InlineKeyboardButton("Next ➡️", callback_data=f"page|{query_text[:40]}|{page + 1}")
         )
 
     if nav_buttons:
         rows.append(nav_buttons)
+
+    # Adding Owner and Support Group buttons to Search Results
+    rows.append([
+        InlineKeyboardButton("💬 Support Group", url=config.SUPPORT_GROUP_LINK),
+        InlineKeyboardButton("👨‍💻 Owner", url=config.OWNER_PROFILE_LINK)
+    ])
 
     return InlineKeyboardMarkup(rows)
 
@@ -260,16 +128,100 @@ app = Client(
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
+    user_id = message.from_user.id
+    await add_user(user_id)
     await message.reply_text(
         "👋 Welcome to CineBro!\n\n"
-        "Send any movie name and I will find and deliver matching files directly."
+        "Send any movie name and I will find and deliver matching files directly.\n"
+        "Use /help to see more options."
     )
 
+@app.on_message(filters.command("help") & filters.private)
+async def help_cmd(client: Client, message: Message):
+    help_text = (
+        "<b>🎬 CineBro Help Menu</b>\n\n"
+        "Just send me any movie or series name and I will find it for you!\n"
+    )
+    if message.from_user and message.from_user.id == config.ADMIN_ID:
+        help_text += (
+            "\n<b>👑 Admin Commands:</b>\n"
+            "<code>/stats</code> - Dashboard with CPU, RAM, Users, and Movies\n"
+            "<code>/broadcast &lt;msg&gt;</code> - Mass message all users (or reply to a msg)\n"
+            "<code>/reply &lt;user_id&gt; &lt;msg&gt;</code> - Message a specific user\n"
+        )
+    await message.reply_text(help_text)
 
-@app.on_message(filters.private & ~filters.command(["start", "help"]))
+@app.on_message(filters.command("stats") & filters.user(config.ADMIN_ID) & filters.private)
+async def stats_cmd(client: Client, message: Message):
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory().percent
+    uptime = time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - start_time))
+    total_users = await get_total_users_count()
+    total_movies = await get_total_movies_count()
+    
+    await message.reply_text(
+        f"<b>📊 Admin Dashboard</b>\n\n"
+        f"<b>👥 Total Users:</b> {total_users}\n"
+        f"<b>🎬 Indexed Movies:</b> {total_movies}\n"
+        f"<b>🖥 CPU Usage:</b> {cpu}%\n"
+        f"<b>🐏 RAM Usage:</b> {ram}%\n"
+        f"<b>⏳ Uptime:</b> {uptime}"
+    )
+
+@app.on_message(filters.command("broadcast") & filters.user(config.ADMIN_ID) & filters.private)
+async def broadcast_cmd(client: Client, message: Message):
+    if len(message.command) < 2 and not message.reply_to_message:
+        return await message.reply_text("Please provide a message or reply to a message to broadcast.")
+    
+    msg = await message.reply_text("Broadcast started...")
+    succ = 0
+    fail = 0
+    users_cursor = await get_all_users()
+    
+    async for user in users_cursor:
+        try:
+            if message.reply_to_message:
+                await message.reply_to_message.copy(user["user_id"])
+            else:
+                await client.send_message(user["user_id"], message.text.split(None, 1)[1])
+            succ += 1
+            await asyncio.sleep(0.1)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+        except Exception:
+            fail += 1
+
+    await msg.edit_text(f"Broadcast complete!\nSuccess: {succ}\nFailed: {fail}")
+
+@app.on_message(filters.command("reply") & filters.user(config.ADMIN_ID) & filters.private)
+async def reply_cmd(client: Client, message: Message):
+    if len(message.command) < 3:
+        return await message.reply_text("Usage: /reply <user_id> <message>")
+    
+    try:
+        user_id = int(message.command[1])
+        msg_text = message.text.split(None, 2)[2]
+        await client.send_message(user_id, f"<b>📩 Reply from Admin:</b>\n{msg_text}")
+        await message.reply_text("✅ Message sent successfully.")
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to send message: {e}")
+
+@app.on_message(filters.private & ~filters.command(["start", "help", "stats", "broadcast", "reply"]))
 async def search_and_deliver(client: Client, message: Message):
     user_id = message.from_user.id if message.from_user else 0
     query_text = (message.text or "").strip()
+
+    await add_user(user_id)
+
+    if config.LOG_CHANNEL_ID:
+        try:
+            name = message.from_user.first_name if message.from_user else "Unknown"
+            await client.send_message(
+                config.LOG_CHANNEL_ID,
+                f"<b>🔍 New Search</b>\n<b>User:</b> <a href='tg://user?id={user_id}'>{name}</a> (`{user_id}`)\n<b>Query:</b> {query_text}"
+            )
+        except Exception as e:
+            print(f"Log Error: {e}")
 
     if len(query_text) < 2:
         await message.reply_text("Please enter at least 2 characters to search.")
@@ -282,31 +234,46 @@ async def search_and_deliver(client: Client, message: Message):
     searching_message = await message.reply_text("🔎 Searching...")
 
     try:
-        base_query = build_base_query(query_text)
-        lang_options, quality_options, season_options = await fetch_available_filters(base_query)
+        movies, total = await fetch_page(query_text, 0)
+        
+        # --- IMDB SPELL CHECK FALLBACK ---
+        corrected_query = None
+        if not movies:
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    url = f"https://v3.sg.media-imdb.com/suggestion/x/{query_text.lower()}.json"
+                    async with session.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for item in data.get('d', []):
+                                if item.get('qid') in ('movie', 'tvSeries', 'tvMiniSeries'):
+                                    suggestion = item.get('l')
+                                    if suggestion and suggestion.lower() != query_text.lower():
+                                        smovies, stotal = await fetch_page(suggestion, 0)
+                                        if smovies:
+                                            movies = smovies
+                                            total = stotal
+                                            corrected_query = suggestion
+                                            break
+            except Exception as e:
+                print(f"IMDB Search Error: {e}")
+            
+            if corrected_query:
+                query_text = corrected_query
+        # ---------------------------------
 
-        session_id = uuid.uuid4().hex[:10]
-        clear_old_sessions()
-        SEARCH_SESSIONS[session_id] = {
-            "query": query_text,
-            "lang_options": lang_options,
-            "quality_options": quality_options,
-            "season_options": season_options,
-            "ts": time.time(),
-        }
-
-        selected_lang = "all"
-        selected_quality = "all"
-        selected_season = "all"
-        movies, total = await fetch_page(query_text, 0, selected_lang, selected_quality, selected_season)
         if not movies:
             await searching_message.edit_text("😕 Sorry, I couldn't find anything for that query. Try a slightly different name.")
             return
 
         max_page = (total - 1) // PAGE_SIZE if total else 0
-        keyboard = build_results_keyboard(session_id, 0, selected_lang, selected_quality, selected_season, movies, total)
+        keyboard = build_results_keyboard(query_text, 0, movies, total)
+        
+        header_text = f"<b>Results for:</b> {query_text} (Auto-corrected)\n" if corrected_query else f"<b>Results for:</b> {query_text}\n"
+        
         await searching_message.edit_text(
-            f"<b>Results for:</b> {query_text}\n"
+            f"{header_text}"
             f"<b>Page:</b> 1/{max_page + 1}\n"
             "Select a file to receive:",
             reply_markup=keyboard,
@@ -321,7 +288,7 @@ async def callback_router(client: Client, call: CallbackQuery):
     data = call.data or ""
 
     if data.startswith("send_file|"):
-        parts = data.split("|", 2)
+        parts = data.split("|", 1)
         if len(parts) < 2:
             await call.answer("Invalid file request.", show_alert=True)
             return
@@ -342,23 +309,43 @@ async def callback_router(client: Client, call: CallbackQuery):
             return
 
         title = movie.get("title") or movie.get("clean_title") or "Unknown"
+        bot_me = await client.get_me()
+        bot_username = bot_me.username
+        
         season_val = movie.get("season", "")
         quality_val = movie.get("quality", "unknown")
-        language_val = movie.get("language", "unknown")
         size = format_size(movie.get("size", 0))
         
+        langs = movie.get("languages", [])
+        if not langs:
+            lang_val = movie.get("language", "unknown")
+            langs = [lang_val] if lang_val else ["unknown"]
+            
+        language_str = ", ".join(str(l).title() for l in langs if l and str(l).lower() != "unknown")
+
         caption_lines = [
             f"🎬 <b>Title:</b> {title}"
         ]
         if season_val:
             caption_lines.append(f"📺 <b>Season:</b> {season_val}")
-        if quality_val and quality_val != "unknown":
-            caption_lines.append(f"💿 <b>Quality:</b> {to_quality_label(quality_val)}")
-        if language_val and language_val != "unknown":
-            caption_lines.append(f"🗣 <b>Language:</b> {language_val.title()}")
-        caption_lines.append(f"💾 <b>Size:</b> {size}")
+        if quality_val and str(quality_val).lower() not in ["none", "unknown"]:
+            caption_lines.append(f"💿 <b>Quality:</b> {str(quality_val).upper()}")
+        if language_str:
+            caption_lines.append(f"🗣 <b>Language:</b> {language_str}")
+        if size and size != "0 B":
+            caption_lines.append(f"💾 <b>Size:</b> {size}")
+            
+        caption_lines.append("")
+        caption_lines.append(f"🤖 <b>Downloaded via:</b> @{bot_username}")
         
         caption = "\n".join(caption_lines)
+
+        buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("💬 Support Group", url=config.SUPPORT_GROUP_LINK),
+                InlineKeyboardButton("👨‍💻 Owner", url=config.OWNER_PROFILE_LINK)
+            ]
+        ])
 
         try:
             await safe_copy_message(
@@ -367,20 +354,21 @@ async def callback_router(client: Client, call: CallbackQuery):
                 from_chat_id=source_chat_id,
                 message_id=msg_id,
                 caption=caption,
+                reply_markup=buttons
             )
-            await call.answer("Sending file...")
+            await call.answer("File sent successfully!")
         except Exception as exc:
             await call.answer("Failed to send file.", show_alert=True)
             await call.message.reply_text(f"❌ Delivery failed: {exc}")
         return
 
     if data.startswith("page|"):
-        parts = data.split("|", 5)
-        if len(parts) != 6:
+        parts = data.split("|", 2)
+        if len(parts) != 3:
             await call.answer("Invalid page request.", show_alert=True)
             return
 
-        session_id = parts[1]
+        query_text = parts[1]
         try:
             page = int(parts[2])
         except ValueError:
@@ -389,24 +377,14 @@ async def callback_router(client: Client, call: CallbackQuery):
         if page < 0:
             page = 0
 
-        selected_lang = normalize_language(parts[3]) or "all"
-        selected_quality = normalize_quality(parts[4]) or "all"
-        selected_season = parts[5] or "all"
-        
-        session = SEARCH_SESSIONS.get(session_id)
-        if not session:
-            await call.answer("Search expired. Please search again.", show_alert=True)
-            return
-
-        query_text = session.get("query", "")
         try:
-            movies, total = await fetch_page(query_text, page, selected_lang, selected_quality, selected_season)
+            movies, total = await fetch_page(query_text, page)
             if not movies:
                 await call.answer("No more results.", show_alert=True)
                 return
 
             max_page = (total - 1) // PAGE_SIZE if total else 0
-            keyboard = build_results_keyboard(session_id, page, selected_lang, selected_quality, selected_season, movies, total)
+            keyboard = build_results_keyboard(query_text, page, movies, total)
             await call.message.edit_text(
                 f"<b>Results for:</b> {query_text}\n"
                 f"<b>Page:</b> {page + 1}/{max_page + 1}\n"
@@ -419,75 +397,8 @@ async def callback_router(client: Client, call: CallbackQuery):
             await call.message.reply_text(f"❌ Pagination error: {exc}")
         return
 
-    if data.startswith("lang|") or data.startswith("qual|") or data.startswith("season|"):
-        parts = data.split("|", 5)
-        if len(parts) != 6:
-            await call.answer("Invalid filter request.", show_alert=True)
-            return
-
-        action = parts[0]
-        session_id = parts[1]
-        try:
-            page = int(parts[2])
-        except ValueError:
-            page = 0
-            
-        selected_lang = normalize_language(parts[3]) or "all"
-        selected_quality = normalize_quality(parts[4]) or "all"
-        selected_season = parts[5] or "all"
-
-        session = SEARCH_SESSIONS.get(session_id)
-        if not session:
-            await call.answer("Search expired. Please search again.", show_alert=True)
-            return
-
-        lang_options = session.get("lang_options", ["all"])
-        quality_options = session.get("quality_options", ["all"])
-        season_options = session.get("season_options", ["all"])
-        
-        if "all" not in lang_options:
-            lang_options = ["all"] + lang_options
-        if "all" not in quality_options:
-            quality_options = ["all"] + quality_options
-        if "all" not in season_options:
-            season_options = ["all"] + season_options
-
-        if action == "lang":
-            selected_lang = cycle_option(selected_lang, lang_options)
-            page = 0
-        elif action == "qual":
-            selected_quality = cycle_option(selected_quality, quality_options)
-            page = 0
-        elif action == "season":
-            selected_season = cycle_option(selected_season, season_options)
-            page = 0
-
-        query_text = session.get("query", "")
-
-        try:
-            movies, total = await fetch_page(query_text, page, selected_lang, selected_quality, selected_season)
-            if not movies:
-                await call.answer("❌ Not available in this Language/Quality/Season", show_alert=True)
-                return
-
-            max_page = (total - 1) // PAGE_SIZE if total else 0
-            keyboard = build_results_keyboard(session_id, page, selected_lang, selected_quality, selected_season, movies, total)
-            await call.message.edit_text(
-                f"<b>Results for:</b> {query_text}\n"
-                f"<b>Page:</b> {page + 1}/{max_page + 1}\n"
-                "Select a file to receive:",
-                reply_markup=keyboard,
-            )
-            await call.answer()
-        except Exception as exc:
-            await call.answer("Failed to apply filter.", show_alert=True)
-            await call.message.reply_text(f"❌ Filter error: {exc}")
-        return
 
 async def main():
-    print("Initializing Database Indexes...")
-    await setup_indexes()
-    
     print("Starting Telegram Bot Client...")
     await app.start()
     

@@ -6,6 +6,7 @@ import config
 client = AsyncIOMotorClient(config.MONGO_URI, tz_aware=True)
 db = client[config.DB_NAME]
 movies_col = db['movies']
+users_col = db['users']
 
 QUALITY_SCORES = {
     "4k": 4000,
@@ -52,6 +53,7 @@ async def setup_indexes():
     await movies_col.create_index([("languages", 1)])
     await movies_col.create_index([("quality", 1)])
     await movies_col.create_index([("season", 1)])
+    await users_col.create_index([("user_id", 1)], unique=True)
     print("Database indexes created successfully.")
 
 async def insert_movies_batch(movies_list):
@@ -242,3 +244,12 @@ async def get_total_movies_count() -> int:
 async def flush_movies_collection() -> int:
     result = await movies_col.delete_many({})
     return result.deleted_count
+
+async def add_user(user_id: int):
+    await users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
+
+async def get_all_users():
+    return users_col.find({})
+
+async def get_total_users_count() -> int:
+    return await users_col.count_documents({})
