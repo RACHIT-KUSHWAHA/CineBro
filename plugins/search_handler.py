@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from pyrogram import Client, filters
@@ -203,14 +204,22 @@ async def cb_quality_selected(client: Client, query: CallbackQuery):
         await query.answer("File pointer missing in backup storage.", show_alert=True)
         return
 
-    await query.answer("Sending file...")
+    await query.message.reply_text("Sending file...")
 
     try:
-        await client.copy_message(
+        sent_msg = await client.copy_message(
             chat_id=query.from_user.id,
             from_chat_id=source_chat_id,
             message_id=msg_id,
-            caption="Delivered by Movie Bot",
+            caption="⚠️ **Please forward this file to your Saved Messages or another chat.**\n\n_Because this file will be deleted in 30 minutes to avoid copyright bans._\n\nDelivered by Movie Bot"
         )
+        if sent_msg:
+            async def auto_delete():
+                await asyncio.sleep(1800)
+                try:
+                    await client.delete_messages(chat_id=query.from_user.id, message_ids=sent_msg.id)
+                except Exception:
+                    pass
+            asyncio.create_task(auto_delete())
     except Exception as exc:
         await query.message.reply_text(f"Error sending file: {exc}")
