@@ -1,8 +1,9 @@
 import re
 import mimetypes
+import time
 from aiohttp import web
 from bson import ObjectId
-from pyrogram.errors import OffsetInvalid
+from pyrogram.errors import OffsetInvalid, FloodWait
 from database import movies_col
 
 # Pyrogram stream_media uses 1 MiB chunks internally. "offset" and "limit"
@@ -19,6 +20,9 @@ class TelegramStreamer:
             web.options('/stream/{mongo_id}', self.handle_options)
         ])
         self.runner = None
+        # When Telegram returns a FloodWait for streaming, block new
+        # stream attempts until this timestamp to avoid hammering.
+        self._cooldown_until = 0.0
 
     async def handle_options(self, request):
         return web.Response(
@@ -87,6 +91,20 @@ class TelegramStreamer:
 
         range_header = request.headers.get("Range", "")
         print(f"📡 Range: {range_header or 'FULL'}")
+
+        # If we recently hit a Telegram FloodWait, short-circuit with 503
+        # instead of triggering more ExportAuthorization calls.
+        now = time.time()
+        if now < self._cooldown_until:
+            retry_after = int(self._cooldown_until - now)
+            return web.Response(
+                status=503,
+                headers={
+                    "Retry-After": str(retry_after),
+                    "Content-Type": "text/plain; charset=utf-8",
+                },
+                text=f"Temporary Telegram flood limit. Try again in {retry_after} seconds.",
+            )
 
         # ---------------- DB ----------------
         try:
@@ -208,6 +226,10 @@ class TelegramStreamer:
             )
             print(f"✅ Done streaming ({bytes_sent} bytes sent)")
 
+        except FloodWait as e:
+            # Remember cooldown for subsequent requests and log clearly.
+            self._cooldown_until = time.time() + int(e.value) + 1
+            print(f"❌ FLOOD WAIT: Must wait {e.value} seconds before streaming again.")
         except OffsetInvalid as e:
             print(f"❌ OFFSET ERROR: {e}")
         except ConnectionResetError:
