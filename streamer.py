@@ -30,40 +30,45 @@ class TelegramStreamer:
         try:
             movie = await movies_col.find_one({"_id": ObjectId(mongo_id)})
         except Exception:
-            return web.Response(status=404, text="Invalid ID format.")
+            return web.Response(status=400, text="Invalid ID format.")
             
         if not movie:
             return web.Response(status=404, text="File not found in database.")
             
-        file_size = movie.get("size")
-        file_id = movie.get("file_id")
-        
-        # Fallback to get message if missing required properties
-        if not file_size or not file_id:
-            try:
-                msg = await self.client.get_messages(
-                    movie.get("source_chat_id"), 
-                    movie.get("msg_id")
-                )
-                media = getattr(msg, msg.media.value) if msg.media else None
-                if not media:
-                    return web.Response(status=404, text="Media not found")
-                file_size = getattr(media, "file_size", 0)
-                file_id = getattr(media, "file_id", "")
-            except Exception as e:
-                return web.Response(status=500, text=f"Error fetching message: {str(e)}")
+        # PRO-MOVE: ALWAYS fetch a fresh message object from Telegram.
+        # This prevents the dreaded "FileReferenceExpired" crash.
+        try:
+            msg = await self.client.get_messages(
+                movie.get("source_chat_id"), 
+                movie.get("msg_id")
+            )
+        except Exception as e:
+            print(f"❌ [STREAM ERROR] Failed to fetch message: {e}")
+            return web.Response(status=500, text=f"Backend Error: Cannot fetch message.")
 
-        file_name = movie.get("title") or movie.get("clean_title") or "video.mp4"
+        if getattr(msg, "empty", False) or not msg:
+            return web.Response(status=404, text="Message deleted or inaccessible.")
+
+        media = getattr(msg, msg.media.value) if msg.media else None
+        if not media:
+            return web.Response(status=404, text="No media found in message.")
+
+        file_size = getattr(media, "file_size", 0)
+        
+        # Clean the filename to prevent HTTP Header Injection crashes
+        raw_name = movie.get("title") or movie.get("clean_title") or "video.mp4"
+        file_name = raw_name.replace('"', '').replace('\n', ' ').strip()
         
         range_header = request.headers.get("Range", "")
         offset = 0
-        limit = 0
+        limit = file_size
         
         status = 200
         content_length = file_size
         
+        # Force a video mime-type if the system can't guess it
         mime_type, _ = mimetypes.guess_type(file_name)
-        mime_type = mime_type or "application/octet-stream"
+        mime_type = mime_type or "video/mp4"
         
         headers = {
             "Accept-Ranges": "bytes",
@@ -101,10 +106,14 @@ class TelegramStreamer:
         await response.prepare(request)
         
         try:
-            async for chunk in self.client.stream_media(message=file_id, limit=limit, offset=offset):
+            # We pass the FULL 'msg' object, not a string ID.
+            # Pyrogram will automatically extract the fresh file_reference.
+            async for chunk in self.client.stream_media(message=msg, limit=limit, offset=offset):
                 await response.write(chunk)
-        except Exception:
-            # Client disconnected or streaming failed
-            pass
+        except ConnectionResetError:
+            pass # User closed the browser/player
+        except Exception as e:
+            # No more hiding errors!
+            print(f"❌ [STREAM CRASH] Error while streaming {file_name}: {e}")
             
         return response
