@@ -10,7 +10,6 @@ class TelegramStreamer:
         self.app = web.Application()
         self.app.add_routes([
             web.get('/stream/{mongo_id}', self.stream_file),
-            web.head('/stream/{mongo_id}', self.stream_file),
             web.options('/stream/{mongo_id}', self.handle_options)
         ])
         self.runner = None
