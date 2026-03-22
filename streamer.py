@@ -35,8 +35,6 @@ class TelegramStreamer:
         if not movie:
             return web.Response(status=404, text="File not found in database.")
             
-        # PRO-MOVE: ALWAYS fetch a fresh message object from Telegram.
-        # This prevents the dreaded "FileReferenceExpired" crash.
         try:
             msg = await self.client.get_messages(
                 movie.get("source_chat_id"), 
@@ -55,7 +53,6 @@ class TelegramStreamer:
 
         file_size = getattr(media, "file_size", 0)
         
-        # Clean the filename to prevent HTTP Header Injection crashes
         raw_name = movie.get("title") or movie.get("clean_title") or "video.mp4"
         file_name = raw_name.replace('"', '').replace('\n', ' ').strip()
         
@@ -66,15 +63,12 @@ class TelegramStreamer:
         status = 200
         content_length = file_size
         
-        # Force a video mime-type if the system can't guess it
         mime_type, _ = mimetypes.guess_type(file_name)
         mime_type = mime_type or "video/mp4"
-        
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Type": mime_type,
-            "Content-Disposition": f'inline; filename="{file_name}"'
-        }
+
+        # The Magic Number (Telegram Chunk Size = 1 MB)
+        chunk_size = 1024 * 1024 
+        skip_bytes = 0
 
         if range_header:
             match = re.match(r"bytes=(\d+)-(\d*)", range_header)
@@ -93,27 +87,63 @@ class TelegramStreamer:
                         text="Requested Range Not Satisfiable", 
                         headers={"Content-Range": f"bytes */{file_size}"}
                     )
-                    
-                offset = start
-                limit = end - start + 1
+                
+                # Align offset to the nearest 1MB boundary
+                aligned_start = start - (start % chunk_size)
+                skip_bytes = start - aligned_start # Bytes to ignore
+                
+                offset = aligned_start
+                limit = end - start + 1 
                 content_length = limit
                 status = 206
-                headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+                headers = {
+                    "Accept-Ranges": "bytes",
+                    "Content-Type": mime_type,
+                    "Content-Disposition": f'inline; filename="{file_name}"',
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(content_length)
+                }
 
-        headers["Content-Length"] = str(content_length)
+        else:
+            headers = {
+                "Accept-Ranges": "bytes",
+                "Content-Type": mime_type,
+                "Content-Disposition": f'inline; filename="{file_name}"',
+                "Content-Length": str(content_length)
+            }
 
         response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
         
         try:
-            # We pass the FULL 'msg' object, not a string ID.
-            # Pyrogram will automatically extract the fresh file_reference.
-            async for chunk in self.client.stream_media(message=msg, limit=limit, offset=offset):
+            bytes_sent = 0
+            # Ask Pyrogram for data starting at the aligned 1MB mark
+            async for chunk in self.client.stream_media(message=msg, offset=offset):
+                if bytes_sent >= limit:
+                    break
+
+                chunk_len = len(chunk)
+
+                # Skip initial unrequested bytes if seeking mid-chunk
+                if skip_bytes > 0:
+                    if skip_bytes >= chunk_len:
+                        skip_bytes -= chunk_len
+                        continue
+                    else:
+                        chunk = chunk[skip_bytes:]
+                        chunk_len = len(chunk)
+                        skip_bytes = 0
+                
+                # Trim the end if we exceed the limit
+                if bytes_sent + chunk_len > limit:
+                    chunk = chunk[:limit - bytes_sent]
+                    
                 await response.write(chunk)
+                bytes_sent += len(chunk)
+
         except ConnectionResetError:
-            pass # User closed the browser/player
+            pass 
         except Exception as e:
-            # No more hiding errors!
             print(f"❌ [STREAM CRASH] Error while streaming {file_name}: {e}")
             
         return response
