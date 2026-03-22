@@ -5,7 +5,8 @@ from bson import ObjectId
 from pyrogram.errors import OffsetInvalid
 from database import movies_col
 
-CHUNK_SIZE = 1024 * 1024  # 1MB Telegram aligned chunk
+CHUNK_SIZE = 1024 * 1024      # Max bytes we plan to send per HTTP window
+TG_BLOCK_SIZE = 4096          # Telegram GetFile offset must be multiple of 4KB
 
 
 class TelegramStreamer:
@@ -134,19 +135,25 @@ class TelegramStreamer:
                         headers={"Content-Range": f"bytes */{file_size}"}
                     )
 
-                # 🔥 ALIGNMENT FIX
-                aligned_offset = start - (start % CHUNK_SIZE)
+                # 🔥 TELEGRAM ALIGNMENT FIX
+                # Telegram expects offset to be a multiple of 4096 bytes.
+                aligned_offset = (start // TG_BLOCK_SIZE) * TG_BLOCK_SIZE
 
-                if aligned_offset + CHUNK_SIZE > file_size:
-                    aligned_offset = max(0, file_size - CHUNK_SIZE)
+                if aligned_offset >= file_size:
+                    aligned_offset = max(0, file_size - TG_BLOCK_SIZE)
 
                 aligned_offset = max(0, aligned_offset)
 
                 offset = aligned_offset
                 skip_bytes = max(0, start - aligned_offset)
 
-                # 🔥 TELEGRAM LIMIT (CRITICAL)
+                # Max we ask Telegram per call (1MB or remaining file from aligned offset)
                 telegram_limit = min(CHUNK_SIZE, file_size - aligned_offset)
+                if telegram_limit <= 0:
+                    return web.Response(
+                        status=416,
+                        headers={"Content-Range": f"bytes */{file_size}"}
+                    )
 
                 bytes_to_send = end - start + 1
                 status = 206
