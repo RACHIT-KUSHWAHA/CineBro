@@ -1,13 +1,12 @@
 import re
 import mimetypes
-import time
+import asyncio
 from aiohttp import web
 from bson import ObjectId
 from pyrogram.errors import OffsetInvalid, FloodWait
 from database import movies_col
 
-# Pyrogram stream_media uses 1 MiB chunks internally. "offset" and "limit"
-# are expressed in number of chunks, not bytes.
+# Telegram uses 1 MiB chunks internally for file streaming.
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
@@ -20,9 +19,8 @@ class TelegramStreamer:
             web.options('/stream/{mongo_id}', self.handle_options)
         ])
         self.runner = None
-        # When Telegram returns a FloodWait for streaming, block new
-        # stream attempts until this timestamp to avoid hammering.
-        self._cooldown_until = 0.0
+        # Limit global concurrency to reduce FloodWait risk.
+        self.semaphore = asyncio.Semaphore(2)
 
     async def handle_options(self, request):
         return web.Response(
@@ -92,20 +90,6 @@ class TelegramStreamer:
         range_header = request.headers.get("Range", "")
         print(f"📡 Range: {range_header or 'FULL'}")
 
-        # If we recently hit a Telegram FloodWait, short-circuit with 503
-        # instead of triggering more ExportAuthorization calls.
-        now = time.time()
-        if now < self._cooldown_until:
-            retry_after = int(self._cooldown_until - now)
-            return web.Response(
-                status=503,
-                headers={
-                    "Retry-After": str(retry_after),
-                    "Content-Type": "text/plain; charset=utf-8",
-                },
-                text=f"Temporary Telegram flood limit. Try again in {retry_after} seconds.",
-            )
-
         # ---------------- DB ----------------
         try:
             movie = await movies_col.find_one({"_id": ObjectId(mongo_id)})
@@ -131,16 +115,17 @@ class TelegramStreamer:
         if file_size <= 0:
             return web.Response(status=500, text="Invalid file")
 
-        file_name = (movie.get("title") or "video.mp4").replace('"', '')
-        mime_type = mimetypes.guess_type(file_name)[0] or "video/mp4"
+        file_name = (movie.get("title") or "video").replace('"', '')
+        mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
 
         # ---------------- RANGE DEFAULT ----------------
         start = 0
         end = file_size - 1
-        status = 200
         skip_bytes = 0
         chunk_offset = 0
-        chunk_limit = 0  # 0 means "no limit" to stream_media
+        chunk_limit = 0  # 0 = no limit (Telegram handles chunking)
+        bytes_to_send = file_size
+        status = 200
 
         # ---------------- RANGE PARSE ----------------
         if range_header:
@@ -149,25 +134,30 @@ class TelegramStreamer:
                 start = int(match.group(1))
                 end = int(match.group(2)) if match.group(2) else file_size - 1
 
-                if end >= file_size:
-                    end = file_size - 1
+                # Clamp end within file size
+                end = min(end, file_size - 1)
 
+                # Invalid start range
                 if start < 0 or start >= file_size or end < start:
                     return web.Response(
                         status=416,
-                        headers={"Content-Range": f"bytes */{file_size}"}
+                        headers={"Content-Range": f"bytes */{file_size}"},
                     )
 
-                # Map byte range to stream_media chunk offset/limit.
-                # stream_media's offset/limit are chunk counts, not bytes.
-                first_chunk = start // CHUNK_SIZE
-                first_chunk_offset = start % CHUNK_SIZE
-                last_chunk = end // CHUNK_SIZE
-                needed_chunks = (last_chunk - first_chunk) + 1
+                # --- Safe offset alignment ---
+                aligned_offset = start - (start % CHUNK_SIZE)
+                aligned_offset = max(0, aligned_offset)
 
-                chunk_offset = first_chunk
-                chunk_limit = needed_chunks
-                skip_bytes = first_chunk_offset
+                if aligned_offset + CHUNK_SIZE > file_size:
+                    aligned_offset = max(0, file_size - CHUNK_SIZE)
+
+                chunk_offset = aligned_offset // CHUNK_SIZE
+
+                # Fix OFFSET_INVALID near file end
+                if (file_size - (chunk_offset * CHUNK_SIZE)) < CHUNK_SIZE:
+                    chunk_offset = max(0, (file_size // CHUNK_SIZE) - 1)
+
+                skip_bytes = max(0, start - aligned_offset)
                 bytes_to_send = end - start + 1
                 status = 206
 
@@ -178,17 +168,15 @@ class TelegramStreamer:
                     "Content-Length": str(bytes_to_send),
                     "Content-Disposition": f'inline; filename="{file_name}"',
                     "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
                 }
 
-                print(f"✂️ Range {start}-{end} | ChunkOffset {chunk_offset} | ChunkLimit {chunk_limit} | Skip {skip_bytes}")
+                print(
+                    f"✂️ Range {start}-{end} | AlignedOffset {aligned_offset} | "
+                    f"ChunkOffset {chunk_offset} | Skip {skip_bytes} | Bytes {bytes_to_send}"
+                )
 
             else:
                 # fallback
-                chunk_offset = 0
-                chunk_limit = 0
-                bytes_to_send = file_size
-
                 headers = {
                     "Content-Type": mime_type,
                     "Accept-Ranges": "bytes",
@@ -196,15 +184,20 @@ class TelegramStreamer:
                 }
 
         else:
-            chunk_offset = 0
-            chunk_limit = 0
-            bytes_to_send = file_size
-
             headers = {
                 "Content-Type": mime_type,
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(file_size),
             }
+
+        # Download mode (?download=1)
+        if request.rel_url.query.get("download") == "1":
+            headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
+        else:
+            headers.setdefault(
+                "Content-Disposition",
+                f'inline; filename="{file_name}"',
+            )
 
         # ---------------- RESPONSE ----------------
         response = web.StreamResponse(status=status, headers=headers)
@@ -215,26 +208,48 @@ class TelegramStreamer:
 
         print("🚀 Streaming started...")
 
-        try:
-            bytes_sent = await self._stream_from_offset(
-                response=response,
-                msg=msg,
-                chunk_offset=chunk_offset,
-                chunk_limit=chunk_limit,
-                skip_bytes=skip_bytes,
-                bytes_to_send=bytes_to_send,
-            )
-            print(f"✅ Done streaming ({bytes_sent} bytes sent)")
+        # Global concurrency limiter
+        async with self.semaphore:
+            # Retry mechanism: up to 2 attempts for transient errors
+            for attempt in range(2):
+                try:
+                    bytes_sent = await self._stream_from_offset(
+                        response=response,
+                        msg=msg,
+                        chunk_offset=chunk_offset,
+                        chunk_limit=chunk_limit,
+                        skip_bytes=skip_bytes,
+                        bytes_to_send=bytes_to_send,
+                    )
+                    print(f"✅ Done streaming ({bytes_sent} bytes sent)")
+                    break
 
-        except FloodWait as e:
-            # Remember cooldown for subsequent requests and log clearly.
-            self._cooldown_until = time.time() + int(e.value) + 1
-            print(f"❌ FLOOD WAIT: Must wait {e.value} seconds before streaming again.")
-        except OffsetInvalid as e:
-            print(f"❌ OFFSET ERROR: {e}")
-        except ConnectionResetError:
-            print("⚠️ Client closed")
-        except Exception as e:
-            print(f"❌ Crash: {e}")
+                except FloodWait as e:
+                    # Respect Telegram's FloodWait and surface a 503
+                    print(f"🚫 FloodWait: waiting {e.value}s")
+                    await asyncio.sleep(e.value)
+                    return web.Response(
+                        status=503,
+                        text=f"Server busy, retry after {e.value}s",
+                    )
+
+                except OffsetInvalid as e:
+                    print(f"❌ OFFSET ERROR: {e}")
+                    # OFFSET_INVALID should be prevented by alignment; if it
+                    # still happens, don't hammer Telegram.
+                    if attempt == 0:
+                        continue
+                    break
+
+                except ConnectionResetError:
+                    print("⚠️ Client closed")
+                    break
+
+                except Exception as e:
+                    print(f"❌ Crash (attempt {attempt + 1}): {e}")
+                    if attempt == 0:
+                        # Retry once on generic errors
+                        continue
+                    break
 
         return response

@@ -22,13 +22,9 @@ export default {
 
       const headers = new Headers();
 
-      // 🔥 IMPORTANT: Forward Range
+      // 🔥 IMPORTANT: Forward Range only
       const range = request.headers.get("range");
       if (range) headers.set("range", range);
-
-      headers.set("accept", "*/*");
-      headers.set("connection", "keep-alive");
-      headers.set("accept-encoding", "identity");
 
       try {
         const backendRes = await fetch(backendUrl, {
@@ -40,33 +36,12 @@ export default {
           }
         });
 
-        // 🔥 FIX: Clone + sanitize headers
-        const newHeaders = new Headers();
-
-        const allowedHeaders = [
-          "content-type",
-          "content-length",
-          "content-range",
-          "accept-ranges",
-          "content-disposition"
-        ];
-
-        for (const [key, value] of backendRes.headers.entries()) {
-          if (allowedHeaders.includes(key.toLowerCase())) {
-            newHeaders.set(key, value);
-          }
-        }
-
-        // 🔥 FORCE critical headers
-        newHeaders.set("Accept-Ranges", "bytes");
-        newHeaders.set("Cache-Control", "no-cache");
-        newHeaders.set("Connection", "keep-alive");
-
+        // 🔥 Passthrough response (do not modify headers)
         return new Response(
           request.method === "HEAD" ? null : backendRes.body,
           {
             status: backendRes.status,
-            headers: newHeaders
+            headers: backendRes.headers
           }
         );
 
@@ -80,6 +55,7 @@ export default {
     // =========================
     if (path.startsWith("/watch/") && fileId) {
       const streamUrl = `${url.origin}/stream/${fileId}`;
+      const downloadUrl = `${streamUrl}?download=1`;
 
       const html = `
 <!DOCTYPE html>
@@ -259,6 +235,27 @@ export default {
       font-size: 11px;
       color: var(--muted);
     }
+    .status {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .alert {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(248,113,113,0.5);
+      background: rgba(127,29,29,0.75);
+      color: #fee2e2;
+      font-size: 12px;
+    }
+    .alert a {
+      color: #fee2e2;
+      text-decoration: underline;
+    }
+    .hidden {
+      display: none;
+    }
     @media (max-width: 640px) {
       .shell {
         gap: 12px;
@@ -288,14 +285,15 @@ export default {
 
     <main class="card">
       <div class="video-wrapper">
-        <video id="video" controls autoplay playsinline preload="metadata">
-          <source src="${streamUrl}" type="video/mp4" />
-        </video>
+        <video id="video" controls autoplay playsinline preload="none"></video>
       </div>
 
+      <div id="status" class="status"></div>
+      <div id="errorBox" class="alert hidden"></div>
+
       <div class="button-row">
-        <a class="btn btn-primary" href="${streamUrl}" download>
-          ⬇ Download (Browser)
+        <a class="btn btn-primary" href="${downloadUrl}" download>
+          ⬇ Download (Browser) (not recommended)
         </a>
         <a class="btn btn-secondary" href="intent:${streamUrl}#Intent;package=com.mxtech.videoplayer.ad;S.title=${fileId};end">
           ▶ MX Player
@@ -320,18 +318,71 @@ export default {
 
   <script>
     (function() {
+      const streamUrl = '${streamUrl}';
+      const botUrl = 'https://t.me/CineBroBot';
+
+      const video = document.getElementById('video');
+      const statusEl = document.getElementById('status');
+      const errorBox = document.getElementById('errorBox');
       const btn = document.getElementById('copyBtn');
-      if (!btn || !navigator.clipboard) return;
-      btn.addEventListener('click', () => {
-        navigator.clipboard.writeText('${streamUrl}').then(() => {
-          const old = btn.textContent;
-          btn.textContent = '✔ Link copied';
-          setTimeout(() => { btn.textContent = old; }, 1800);
-        }).catch(() => {
-          btn.textContent = '✖ Copy failed';
-          setTimeout(() => { btn.textContent = '🔗 Copy stream link'; }, 2000);
+
+      function showError(message) {
+        if (!errorBox) return;
+        const extra = ` If this keeps happening, you can still watch or download the movie directly via our Telegram bot: <a href="${botUrl}" target="_blank" rel="noopener noreferrer">@CineBroBot</a>.`;
+        errorBox.innerHTML = message + extra;
+        errorBox.classList.remove('hidden');
+        if (statusEl) statusEl.textContent = '';
+        if (video) video.style.display = 'none';
+      }
+
+      async function initStream() {
+        if (!video) return;
+        if (statusEl) statusEl.textContent = 'Checking stream availability…';
+        try {
+          const res = await fetch(streamUrl, { method: 'HEAD' });
+          const code = res.status;
+          if (res.ok && (code === 200 || code === 206)) {
+            video.src = streamUrl;
+            if (statusEl) statusEl.textContent = '';
+            if (errorBox) errorBox.classList.add('hidden');
+            video.style.display = 'block';
+            return;
+          }
+
+          if (code === 404) {
+            showError('This file is no longer available on the server or was removed from Telegram.');
+          } else if (code === 429) {
+            showError('Too many people are streaming this file right now. Please wait a minute and try again.');
+          } else if (code === 503) {
+            showError('The stream backend is temporarily busy or Telegram is rate limiting downloads. Please try again in a few minutes.');
+          } else if (code === 403) {
+            showError('Access to this stream is forbidden from your current link. Please open the movie again from the CineBro bot.');
+          } else {
+            showError('The browser could not start the stream due to a network or server error.');
+          }
+        } catch (err) {
+          showError('The browser could not connect to the stream (network error).');
+        }
+      }
+
+      if (btn && navigator.clipboard) {
+        btn.addEventListener('click', () => {
+          navigator.clipboard.writeText(streamUrl).then(() => {
+            const old = btn.textContent;
+            btn.textContent = '✔ Link copied';
+            setTimeout(() => { btn.textContent = old; }, 1800);
+          }).catch(() => {
+            btn.textContent = '✖ Copy failed';
+            setTimeout(() => { btn.textContent = '🔗 Copy stream link'; }, 2000);
+          });
         });
-      });
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initStream);
+      } else {
+        initStream();
+      }
     })();
   </script>
 </body>

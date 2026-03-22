@@ -353,11 +353,23 @@ async def callback_router(client: Client, call: CallbackQuery):
             caption_lines.append(f"🗣 <b>Language:</b> {language_str}")
         if size and size != "0 B":
             caption_lines.append(f"💾 <b>Size:</b> {size}")
-            
-        caption_lines.append("")
-        caption_lines.append(f"🤖 <b>Downloaded via:</b> @{bot_username}")
-        caption_lines.append("⚠️ <b>Note:</b> This file will be <b>deleted in 30 minutes</b>.\n"  # noqa: E501
-                           "Forward it to Saved Messages or another chat if you want to keep it.")
+
+        # Separator for important info
+        caption_lines.append("➖➖➖➖➖➖")
+
+        # Important notices
+        caption_lines.append("⚠️ <b>Important:</b>")
+        caption_lines.append("• This file will be <b>deleted in 30 minutes</b>.")
+        caption_lines.append("• Forward to Saved Messages or another chat if you want to keep it.")
+        caption_lines.append(
+            "• <b>Browser downloads from the web player are not recommended.</b> "
+            "Use MX/VLC or download directly in Telegram for best results."
+        )
+
+        # Share / branding style labels
+        caption_lines.append("➖➖➖➖➖➖")
+        caption_lines.append(f"✈️ <b>Share to Support:</b> @{bot_username}")
+        caption_lines.append(f"🤖 <b>Served by:</b> @{bot_username}")
         
         caption = "\n".join(caption_lines)
 
@@ -437,19 +449,19 @@ async def callback_router(client: Client, call: CallbackQuery):
 async def main():
     print("Starting Telegram Bot Client...")
     await app.start()
-    
+
     me = await app.get_me()
     print(f"✅ Bot Online as @{me.username}")
-    
-    # Start aiohttp streaming server
+
+    # Start aiohttp streaming server using the bot client
     from streamer import TelegramStreamer
     streamer_app = TelegramStreamer(app)
     await streamer_app.start(port=8080)
-    
+
     # Idle until stopped
     from pyrogram import idle
     await idle()
-    
+
     await streamer_app.stop()
     await app.stop()
 
