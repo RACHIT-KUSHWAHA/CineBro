@@ -9,9 +9,22 @@ class TelegramStreamer:
         self.client = client
         self.app = web.Application()
         self.app.add_routes([
-            web.get('/stream/{mongo_id}', self.stream_file)
+            web.get('/stream/{mongo_id}', self.stream_file),
+            web.head('/stream/{mongo_id}', self.stream_file),
+            web.options('/stream/{mongo_id}', self.handle_options)
         ])
         self.runner = None
+        
+    async def handle_options(self, request):
+        return web.Response(
+            status=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                "Access-Control-Allow-Headers": "Range",
+                "Access-Control-Max-Age": "86400",
+            }
+        )
         
     async def start(self, host="0.0.0.0", port=8080):
         self.runner = web.AppRunner(self.app)
@@ -111,6 +124,11 @@ class TelegramStreamer:
 
         response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
+        
+        if request.method == "HEAD":
+            print("🛑 [HEAD REQUEST] Returning headers only.")
+            return response
+
         print("🚀 [STREAMING] Sending bytes to browser...")
         
         try:
