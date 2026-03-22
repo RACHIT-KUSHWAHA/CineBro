@@ -51,6 +51,25 @@ async def safe_copy_message(client: Client, chat_id: int, from_chat_id: int, mes
             await asyncio.sleep(flood.value + 1)
 
 
+async def schedule_auto_delete(client: Client, chat_id: int, message_id: int, delay_seconds: int = 1800) -> None:
+    """Delete a message after a delay to reduce long-term storage and DMCA risk.
+
+    Runs in the background; failures are logged but not raised.
+    """
+    try:
+        await asyncio.sleep(delay_seconds)
+        await client.delete_messages(chat_id, message_id)
+    except FloodWait as flood:
+        # Respect flood waits even for deletions
+        await asyncio.sleep(flood.value + 1)
+        try:
+            await client.delete_messages(chat_id, message_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Auto-delete retry failed: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Auto-delete failed: {exc}")
+
+
 async def fetch_page(query_text: str, page: int):
     base_query = build_base_query(query_text)
     projection = {
@@ -337,6 +356,8 @@ async def callback_router(client: Client, call: CallbackQuery):
             
         caption_lines.append("")
         caption_lines.append(f"🤖 <b>Downloaded via:</b> @{bot_username}")
+        caption_lines.append("⚠️ <b>Note:</b> This file will be <b>deleted in 30 minutes</b>.\n"  # noqa: E501
+                           "Forward it to Saved Messages or another chat if you want to keep it.")
         
         caption = "\n".join(caption_lines)
 
@@ -353,7 +374,7 @@ async def callback_router(client: Client, call: CallbackQuery):
         ])
 
         try:
-            await safe_copy_message(
+            sent = await safe_copy_message(
                 client=client,
                 chat_id=call.message.chat.id,
                 from_chat_id=source_chat_id,
@@ -361,6 +382,16 @@ async def callback_router(client: Client, call: CallbackQuery):
                 caption=caption,
                 reply_markup=buttons
             )
+            # Schedule auto-deletion only in private chats to avoid surprising groups
+            if getattr(call.message.chat, "type", "") == "private" and sent is not None:
+                asyncio.create_task(
+                    schedule_auto_delete(
+                        client=client,
+                        chat_id=sent.chat.id,
+                        message_id=sent.id,
+                        delay_seconds=1800,
+                    )
+                )
             await call.answer("File sent successfully!")
         except Exception as exc:
             await call.answer("Failed to send file.", show_alert=True)
