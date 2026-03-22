@@ -340,7 +340,12 @@ async def callback_router(client: Client, call: CallbackQuery):
         
         caption = "\n".join(caption_lines)
 
+        watch_url = f"https://cinebro-streamer.kushwaharachit80.workers.dev/watch/{raw_id}"
+
         buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🍿 Watch Online", url=watch_url)
+            ],
             [
                 InlineKeyboardButton("💬 Support Group", url=config.SUPPORT_GROUP_LINK),
                 InlineKeyboardButton("👨‍💻 Owner", url=config.OWNER_PROFILE_LINK)
@@ -405,10 +410,16 @@ async def main():
     me = await app.get_me()
     print(f"✅ Bot Online as @{me.username}")
     
+    # Start aiohttp streaming server
+    from streamer import TelegramStreamer
+    streamer_app = TelegramStreamer(app)
+    await streamer_app.start(port=8080)
+    
     # Idle until stopped
     from pyrogram import idle
     await idle()
     
+    await streamer_app.stop()
     await app.stop()
 
 if __name__ == "__main__":
