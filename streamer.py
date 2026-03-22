@@ -5,8 +5,9 @@ from bson import ObjectId
 from pyrogram.errors import OffsetInvalid
 from database import movies_col
 
-CHUNK_SIZE = 1024 * 1024      # Max bytes we plan to send per HTTP window
-TG_BLOCK_SIZE = 4096          # Telegram GetFile offset must be multiple of 4KB
+# Pyrogram stream_media uses 1 MiB chunks internally. "offset" and "limit"
+# are expressed in number of chunks, not bytes.
+CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
 class TelegramStreamer:
@@ -41,14 +42,16 @@ class TelegramStreamer:
         if self.runner:
             await self.runner.cleanup()
 
-    async def _stream_from_offset(self, response, msg, offset: int, skip_bytes: int, bytes_to_send: int):
-        """Low-level helper to stream bytes from Telegram starting at offset.
+    async def _stream_from_offset(self, response, msg, chunk_offset: int, chunk_limit: int,
+                                   skip_bytes: int, bytes_to_send: int):
+        """Stream bytes from Telegram starting at a given chunk offset.
 
-        It trims the first chunk by skip_bytes and stops exactly after
-        bytes_to_send bytes have been written to the HTTP response.
+        chunk_offset / chunk_limit are in units of CHUNK_SIZE, as expected by
+        pyrogram.Client.stream_media. Within the first chunk we skip
+        `skip_bytes` bytes, then stream exactly `bytes_to_send` bytes total.
         """
         bytes_sent = 0
-        async for chunk in self.client.stream_media(message=msg, offset=offset):
+        async for chunk in self.client.stream_media(message=msg, offset=chunk_offset, limit=chunk_limit):
             if bytes_sent >= bytes_to_send:
                 break
 
@@ -118,6 +121,8 @@ class TelegramStreamer:
         end = file_size - 1
         status = 200
         skip_bytes = 0
+        chunk_offset = 0
+        chunk_limit = 0  # 0 means "no limit" to stream_media
 
         # ---------------- RANGE PARSE ----------------
         if range_header:
@@ -135,26 +140,16 @@ class TelegramStreamer:
                         headers={"Content-Range": f"bytes */{file_size}"}
                     )
 
-                # 🔥 TELEGRAM ALIGNMENT FIX
-                # Telegram expects offset to be a multiple of 4096 bytes.
-                aligned_offset = (start // TG_BLOCK_SIZE) * TG_BLOCK_SIZE
+                # Map byte range to stream_media chunk offset/limit.
+                # stream_media's offset/limit are chunk counts, not bytes.
+                first_chunk = start // CHUNK_SIZE
+                first_chunk_offset = start % CHUNK_SIZE
+                last_chunk = end // CHUNK_SIZE
+                needed_chunks = (last_chunk - first_chunk) + 1
 
-                if aligned_offset >= file_size:
-                    aligned_offset = max(0, file_size - TG_BLOCK_SIZE)
-
-                aligned_offset = max(0, aligned_offset)
-
-                offset = aligned_offset
-                skip_bytes = max(0, start - aligned_offset)
-
-                # Max we ask Telegram per call (1MB or remaining file from aligned offset)
-                telegram_limit = min(CHUNK_SIZE, file_size - aligned_offset)
-                if telegram_limit <= 0:
-                    return web.Response(
-                        status=416,
-                        headers={"Content-Range": f"bytes */{file_size}"}
-                    )
-
+                chunk_offset = first_chunk
+                chunk_limit = needed_chunks
+                skip_bytes = first_chunk_offset
                 bytes_to_send = end - start + 1
                 status = 206
 
@@ -168,12 +163,12 @@ class TelegramStreamer:
                     "Connection": "keep-alive",
                 }
 
-                print(f"✂️ Range {start}-{end} | Offset {offset} | Skip {skip_bytes}")
+                print(f"✂️ Range {start}-{end} | ChunkOffset {chunk_offset} | ChunkLimit {chunk_limit} | Skip {skip_bytes}")
 
             else:
                 # fallback
-                offset = 0
-                telegram_limit = CHUNK_SIZE
+                chunk_offset = 0
+                chunk_limit = 0
                 bytes_to_send = file_size
 
                 headers = {
@@ -183,8 +178,8 @@ class TelegramStreamer:
                 }
 
         else:
-            offset = 0
-            telegram_limit = CHUNK_SIZE
+            chunk_offset = 0
+            chunk_limit = 0
             bytes_to_send = file_size
 
             headers = {
@@ -203,40 +198,15 @@ class TelegramStreamer:
         print("🚀 Streaming started...")
 
         try:
-            bytes_sent = 0
-
-            async for chunk in self.client.stream_media(
-                message=msg,
-                offset=offset,
-                limit=telegram_limit  # 🔥 FIXED
-            ):
-                if bytes_sent >= bytes_to_send:
-                    break
-
-                chunk_len = len(chunk)
-
-                # skip initial bytes
-                if skip_bytes > 0:
-                    if skip_bytes >= chunk_len:
-                        skip_bytes -= chunk_len
-                        continue
-                    chunk = chunk[skip_bytes:]
-                    chunk_len = len(chunk)
-                    skip_bytes = 0
-
-                # trim overflow
-                remaining = bytes_to_send - bytes_sent
-                if chunk_len > remaining:
-                    chunk = chunk[:remaining]
-                    chunk_len = len(chunk)
-
-                if chunk_len <= 0:
-                    break
-
-                await response.write(chunk)
-                bytes_sent += chunk_len
-
-            print("✅ Done streaming")
+            bytes_sent = await self._stream_from_offset(
+                response=response,
+                msg=msg,
+                chunk_offset=chunk_offset,
+                chunk_limit=chunk_limit,
+                skip_bytes=skip_bytes,
+                bytes_to_send=bytes_to_send,
+            )
+            print(f"✅ Done streaming ({bytes_sent} bytes sent)")
 
         except OffsetInvalid as e:
             print(f"❌ OFFSET ERROR: {e}")
