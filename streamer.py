@@ -40,6 +40,42 @@ class TelegramStreamer:
         if self.runner:
             await self.runner.cleanup()
 
+    async def _stream_from_offset(self, response, msg, offset: int, skip_bytes: int, bytes_to_send: int):
+        """Low-level helper to stream bytes from Telegram starting at offset.
+
+        It trims the first chunk by skip_bytes and stops exactly after
+        bytes_to_send bytes have been written to the HTTP response.
+        """
+        bytes_sent = 0
+        async for chunk in self.client.stream_media(message=msg, offset=offset):
+            if bytes_sent >= bytes_to_send:
+                break
+
+            chunk_len = len(chunk)
+
+            # Skip initial extra bytes from the aligned offset
+            if skip_bytes > 0:
+                if skip_bytes >= chunk_len:
+                    skip_bytes -= chunk_len
+                    continue
+                chunk = chunk[skip_bytes:]
+                chunk_len = len(chunk)
+                skip_bytes = 0
+
+            remaining = bytes_to_send - bytes_sent
+            if chunk_len > remaining:
+                chunk = chunk[:remaining]
+                chunk_len = len(chunk)
+
+            if chunk_len <= 0:
+                break
+
+            await response.write(chunk)
+            await response.drain()
+            bytes_sent += chunk_len
+
+        return bytes_sent
+
     async def stream_file(self, request):
         mongo_id = request.match_info.get('mongo_id')
         print(f"\n{'='*40}")
