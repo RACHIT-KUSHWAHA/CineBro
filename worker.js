@@ -56,6 +56,8 @@ export default {
     if (path.startsWith("/watch/") && fileId) {
       const streamUrl = `${url.origin}/stream/${fileId}`;
       const downloadUrl = `${streamUrl}?download=1`;
+      const mxIntentUrl = `intent:${streamUrl}#Intent;action=android.intent.action.VIEW;type=video/*;package=com.mxtech.videoplayer.ad;S.title=${fileId};end`;
+      const vlcAppUrl = `vlc://${encodeURIComponent(streamUrl)}`;
 
       const html = `
 <!DOCTYPE html>
@@ -295,10 +297,10 @@ export default {
         <a class="btn btn-primary" href="${downloadUrl}" download>
           ⬇ Download (Browser) (not recommended)
         </a>
-        <a class="btn btn-secondary" href="intent:${streamUrl}#Intent;package=com.mxtech.videoplayer.ad;S.title=${fileId};end">
+        <a class="btn btn-secondary" href="${mxIntentUrl}">
           ▶ MX Player
         </a>
-        <a class="btn btn-secondary" href="vlc://${streamUrl}">
+        <a class="btn btn-secondary" href="${vlcAppUrl}">
           🟠 VLC Player
         </a>
         <button class="btn btn-ghost" id="copyBtn" type="button">
