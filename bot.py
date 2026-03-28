@@ -1,6 +1,7 @@
 import asyncio
 import time
 import psutil
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
@@ -10,6 +11,7 @@ from bson import ObjectId
 from database import build_fuzzy_regex, movies_col, add_user, get_all_users, get_total_users_count, get_total_movies_count
 from utils import is_rate_limited, get_rate_limit_status
 from auto_indexer import AutoIndexer
+from env_manager import EnvManager
 
 
 def format_size(size_bytes: int) -> str:
@@ -225,6 +227,9 @@ app = Client(
 mongo_client = AsyncIOMotorClient(config.MONGO_URI)
 auto_indexer = AutoIndexer(mongo_client, db_name="CineBro")
 
+# Initialize Environment Manager for admin config editing
+env_manager = EnvManager(".env")
+
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
@@ -276,6 +281,7 @@ async def help_cmd(client: Client, message: Message):
             "<code>/stats</code> - Dashboard with CPU, RAM, Users, and Movies\n"
             "<code>/broadcast &lt;msg&gt;</code> - Mass message all users (or reply to a msg)\n"
             "<code>/reply &lt;user_id&gt; &lt;msg&gt;</code> - Message a specific user\n"
+            "<code>/env</code> - View and edit environment variables via Telegram\n"
         )
     await message.reply_text(help_text)
 
@@ -336,7 +342,109 @@ async def reply_cmd(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Failed to send message: {e}")
 
-@app.on_message(filters.private & ~filters.command(["start", "help", "stats", "broadcast", "reply"]))
+
+@app.on_message(filters.command("env") & filters.user(config.ADMIN_ID) & filters.private)
+async def env_command(client: Client, message: Message):
+    """
+    Admin command to view and manage environment variables.
+    Shows configuration status and provides options to edit variables.
+    """
+    text = env_manager.get_env_summary()
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Full Config", callback_data="env_full"),
+         InlineKeyboardButton("✏️ Edit", callback_data="env_edit_menu")],
+        [InlineKeyboardButton("📦 Backups", callback_data="env_backups")]
+    ])
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+@app.on_callback_query(filters.regex(r"^env_") & filters.user(config.ADMIN_ID))
+async def env_callback(client: Client, call: CallbackQuery):
+    """Handle environment configuration callbacks."""
+    data = call.data
+    
+    if data == "env_full":
+        text = env_manager.get_env_display()
+        await call.message.edit_text(text)
+    
+    elif data == "env_edit_menu":
+        keys = env_manager.get_editable_keys()
+        keyboard = InlineKeyboardMarkup(size_multiplier=2)
+        buttons = [
+            InlineKeyboardButton(key, callback_data=f"env_edit_{key}")
+            for key in keys[:20]  # Limit to 20 keys for Telegram button limit
+        ]
+        for i in range(0, len(buttons), 2):
+            keyboard.add(*buttons[i:i+2])
+        
+        keyboard.add(InlineKeyboardButton("❌ Cancel", callback_data="env_cancel"))
+        
+        await call.message.edit_text(
+            "✏️ <b>Select variable to edit:</b>",
+            reply_markup=keyboard
+        )
+    
+    elif data.startswith("env_edit_"):
+        key = data.replace("env_edit_", "")
+        current_value = env_manager.get_key_value(key)
+        current_display = env_manager._mask_value(key, current_value or "")
+        
+        await call.message.edit_text(
+            f"✏️ <b>Edit: {key}</b>\n\n"
+            f"<b>Current value:</b> <code>{current_display}</code>\n\n"
+            f"<b>📝 Send the new value (reply to this message):</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="env_edit_menu")]
+            ])
+        )
+    
+    elif data == "env_backups":
+        text = env_manager.get_backup_list()
+        await call.message.edit_text(text)
+    
+    elif data == "env_cancel":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Full Config", callback_data="env_full"),
+             InlineKeyboardButton("✏️ Edit", callback_data="env_edit_menu")],
+            [InlineKeyboardButton("📦 Backups", callback_data="env_backups")]
+        ])
+        await call.message.edit_text(
+            env_manager.get_env_summary(),
+            reply_markup=keyboard
+        )
+
+
+@app.on_message(filters.reply & filters.user(config.ADMIN_ID) & filters.private & ~filters.command())
+async def handle_env_edit(client: Client, message: Message):
+    """Handle replies to env edit prompts from admin."""
+    if not message.reply_to_message:
+        return
+    
+    reply_text = message.reply_to_message.text or ""
+    
+    # Check if this is an env edit prompt
+    if "✏️ <b>Edit:" not in reply_text:
+        return
+    
+    # Extract the key name from the prompt
+    match = re.search(r"✏️ <b>Edit: (\w+)</b>", reply_text)
+    if not match:
+        return
+    
+    key = match.group(1)
+    new_value = message.text.strip()
+    
+    # Update the value
+    success, result_msg = env_manager.set_value(key, new_value)
+    
+    response = result_msg
+    if success:
+        response += "\n\n🔄 <b>Note:</b> Restart the bot to apply changes."
+    
+    await message.reply_text(response)
+
+
+@app.on_message(filters.private & ~filters.command(["start", "help", "stats", "broadcast", "reply", "env"]))
 async def search_and_deliver(client: Client, message: Message):
     user_id = message.from_user.id if message.from_user else 0
     query_text = (message.text or "").strip()
