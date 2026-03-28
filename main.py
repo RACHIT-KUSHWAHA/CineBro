@@ -541,7 +541,7 @@ async def env_callback(client: Client, call: CallbackQuery):
         await call.message.edit_text(text, reply_markup=keyboard)
 
 
-@app.on_message(filters.reply & (filters.me | filters.user(ADMIN_ID)) & ~filters.command())
+@app.on_message(filters.reply & (filters.me | filters.user(ADMIN_ID)))
 async def handle_env_edit(client: Client, message: Message):
     """Handle replies to env edit prompts from admin."""
     if not message.reply_to_message:
