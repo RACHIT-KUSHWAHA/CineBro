@@ -3,6 +3,7 @@ import re
 import time
 import psutil
 import logging
+from html import escape as html_escape
 from pyrogram import filters
 from pyrogram.client import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -252,7 +253,7 @@ async def index_handler(client, message):
         except Exception as e:
             return await msg.edit(f"<b>❌ Failed to resolve source chat:</b> {e}")
 
-        await msg.edit(f"<b>📂 Indexing: {chat.title}</b>\n<i>Please wait...</i>")
+        await msg.edit(f"<b>📂 Indexing: {html_escape(chat.title or '')}</b>\n<i>Please wait...</i>")
 
         processed_count = 0
         upserted_count = 0
@@ -287,7 +288,7 @@ async def index_handler(client, message):
                 if processed_count % 200 == 0:
                     try:
                         await msg.edit(
-                            f"<b>⏳ Indexed {processed_count} files in {chat.title}...</b>"
+                            f"<b>⏳ Indexed {processed_count} files in {html_escape(chat.title or '')}...</b>"
                         )
                     except FloodWait as e:
                         await asyncio.sleep(int(getattr(e, "value", 0)) + 1)
@@ -327,8 +328,8 @@ async def clone_handler(client: Client, message: Message):
             return await progress.edit(f"❌ Error resolving chats: {e}")
 
         await progress.edit(
-            f"<b>📥 Source:</b> {source_chat.title}\n"
-            f"<b>📤 Destination:</b> {dest_chat.title}\n"
+            f"<b>📥 Source:</b> {html_escape(source_chat.title or '')}\n"
+            f"<b>📤 Destination:</b> {html_escape(dest_chat.title or '')}\n"
             "<i>Cloning started...</i>"
         )
 
@@ -500,7 +501,8 @@ async def reply_cmd(client: Client, message: Message):
     try:
         user_id = int(message.command[1])
         msg_text = message.text.split(None, 2)[2]
-        await client.send_message(user_id, f"<b>📩 Reply from Admin:</b>\n{msg_text}")
+        safe_text = html_escape(msg_text)
+        await client.send_message(user_id, f"<b>📩 Reply from Admin:</b>\n{safe_text}")
         await message.reply_text("✅ Message sent successfully.")
 
         await send_log(

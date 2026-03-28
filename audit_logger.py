@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html import escape as html_escape
 from typing import Any, Iterable, Mapping
 
 import config
@@ -81,6 +82,12 @@ async def send_log(client, text: str, *, disable_preview: bool = True) -> bool:
     if not log_chat_id:
         return False
 
+    # Ensure the peer is resolved (fixes PeerIdInvalid when the ID is correct but not cached).
+    try:
+        await client.get_chat(log_chat_id)
+    except Exception:
+        pass
+
     try:
         await client.send_message(
             log_chat_id,
@@ -89,7 +96,19 @@ async def send_log(client, text: str, *, disable_preview: bool = True) -> bool:
         )
         return True
     except Exception as exc:
-        logger.warning("Failed to send log message: %s", exc)
+        # Retry once after forcing peer resolution.
+        try:
+            await client.get_chat(log_chat_id)
+            await client.send_message(
+                log_chat_id,
+                text,
+                disable_web_page_preview=disable_preview,
+            )
+            return True
+        except Exception as exc2:
+            logger.warning(
+                "Failed to send log message to LOG_CHANNEL_ID=%s: %s", log_chat_id, exc2
+            )
         return False
 
 
@@ -97,6 +116,7 @@ def mention_user(user) -> str:
     if not user:
         return "Unknown"
     name = (getattr(user, "first_name", "") or "").strip() or "User"
+    name = html_escape(name)
     user_id = getattr(user, "id", 0) or 0
     if user_id:
         return f"<a href='tg://user?id={user_id}'>{name}</a> (<code>{user_id}</code>)"
@@ -116,19 +136,20 @@ def format_startup_report(component: str, missing_keys: list[str]) -> str:
 
 
 def format_download_log(user, title: str, *, season: str = "", quality: str = "", language: str = "", size: str = "") -> str:
+    safe_title = html_escape(str(title or ""))
     parts = [
         "⬇️ <b>Download served</b>",
         f"<b>User:</b> {mention_user(user)}",
-        f"<b>Title:</b> {title}",
+        f"<b>Title:</b> {safe_title}",
     ]
     if season:
-        parts.append(f"<b>Season:</b> {season}")
+        parts.append(f"<b>Season:</b> {html_escape(str(season))}")
     if quality:
-        parts.append(f"<b>Quality:</b> {quality}")
+        parts.append(f"<b>Quality:</b> {html_escape(str(quality))}")
     if language:
-        parts.append(f"<b>Language:</b> {language}")
+        parts.append(f"<b>Language:</b> {html_escape(str(language))}")
     if size:
-        parts.append(f"<b>Size:</b> {size}")
+        parts.append(f"<b>Size:</b> {html_escape(str(size))}")
     parts.append(f"<b>Time:</b> {utc_now()}")
     return "\n".join(parts)
 
@@ -138,7 +159,7 @@ def format_env_change(actor, key: str, old_value: Any, new_value: Any) -> str:
         "🛠 <b>.env updated</b>\n"
         f"<b>By:</b> {mention_user(actor)}\n"
         f"<b>Key:</b> <code>{key}</code>\n"
-        f"<b>Old:</b> <code>{mask_value(key, old_value)}</code>\n"
-        f"<b>New:</b> <code>{mask_value(key, new_value)}</code>\n"
+        f"<b>Old:</b> <code>{html_escape(mask_value(key, old_value))}</code>\n"
+        f"<b>New:</b> <code>{html_escape(mask_value(key, new_value))}</code>\n"
         f"<b>Time:</b> {utc_now()}"
     )

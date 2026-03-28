@@ -2,6 +2,7 @@ import asyncio
 import time
 import psutil
 import logging
+from html import escape as html_escape
 from pyrogram import filters
 from pyrogram.client import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -306,6 +307,7 @@ async def help_cmd(client: Client, message: Message):
 async def search_and_deliver(client: Client, message: Message):
     user_id = message.from_user.id if message.from_user else 0
     query_text = (message.text or "").strip()
+    safe_query_text = html_escape(query_text)
 
     await add_user(user_id)
 
@@ -403,7 +405,7 @@ async def search_and_deliver(client: Client, message: Message):
                 InlineKeyboardButton("💬 Support Group", url=config.SUPPORT_GROUP_LINK)
             ])
             
-            header_msg = f"<b>Results for:</b> {query_text} (Auto-corrected)\n" if corrected_query else f"<b>Results for:</b> {query_text}\n"
+            header_msg = f"<b>Results for:</b> {safe_query_text} (Auto-corrected)\n" if corrected_query else f"<b>Results for:</b> {safe_query_text}\n"
             
             await searching_message.edit_text(
                 f"{header_msg}"
@@ -417,7 +419,7 @@ async def search_and_deliver(client: Client, message: Message):
             max_page = (total - 1) // PAGE_SIZE if total else 0
             keyboard = build_results_keyboard(query_text, 0, movies, total)
             
-            header_text = f"<b>Results for:</b> {query_text} (Auto-corrected)\n" if corrected_query else f"<b>Results for:</b> {query_text}\n"
+            header_text = f"<b>Results for:</b> {safe_query_text} (Auto-corrected)\n" if corrected_query else f"<b>Results for:</b> {safe_query_text}\n"
             
             await searching_message.edit_text(
                 f"{header_text}"
