@@ -6,6 +6,7 @@ Runs the telegram search bot with production-grade features.
 
 import asyncio
 import sys
+from pyrogram import idle
 from bot import app, start_time
 from database import setup_indexes
 import config
@@ -54,14 +55,14 @@ async def initialize_bot():
         print(f"🌐 Bot ready for incoming messages...")
         print(f"⏱️  Start time: {start_time}")
         
-        await app.idle()
+        await idle()
         
     except KeyboardInterrupt:
         print("\n⚠️  Bot interrupted by user")
-        sys.exit(0)
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
-        sys.exit(1)
+        import traceback
+        traceback.print_exc()
     finally:
         print("🛑 Stopping bot...")
         await app.stop()
