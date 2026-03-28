@@ -171,7 +171,7 @@ async def log_every_message(_: Client, message: Message):
     text = message.text or message.caption or "<non-text message>"
     print(f"[LOG] Message received: {text}")
 
-@app.on_message(filters.command("status", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("status", prefixes=".") & (filters.user(ADMIN_ID)))
 async def status_handler(client, message):
     try:
         import psutil
@@ -190,7 +190,7 @@ async def status_handler(client, message):
         await message.reply_text(f"❌ Error: {e}")
 
 
-@app.on_message(filters.command("help", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("help", prefixes=".") & (filters.user(ADMIN_ID)))
 async def help_handler(client: Client, message: Message):
     try:
         help_text = (
@@ -206,7 +206,7 @@ async def help_handler(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Error while showing help: {e}")
 
-@app.on_message(filters.command("id", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("id", prefixes=".") & (filters.user(ADMIN_ID)))
 async def id_handler(client: Client, message: Message):
     try:
         if message.reply_to_message:
@@ -223,7 +223,7 @@ async def id_handler(client: Client, message: Message):
         await message.reply_text(f"❌ Error getting ID: {e}")
 
 
-@app.on_message(filters.command("index", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("index", prefixes=".") & (filters.user(ADMIN_ID)))
 async def index_handler(client, message):
     try:
         if len(message.command) < 2:
@@ -295,7 +295,7 @@ async def index_handler(client, message):
         await message.reply_text(f"❌ Error during indexing: {e}")
 
 
-@app.on_message(filters.command("clone", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("clone", prefixes=".") & (filters.user(ADMIN_ID)))
 async def clone_handler(client: Client, message: Message):
     try:
         if len(message.command) < 3:
@@ -397,7 +397,7 @@ async def clone_handler(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Error during cloning: {e}")
 
-@app.on_message(filters.command("flush", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("flush", prefixes=".") & (filters.user(ADMIN_ID)))
 async def flush_db(client, message):
     try:
         deleted = await flush_movies_collection()
@@ -410,7 +410,7 @@ async def flush_db(client, message):
 # ADMIN COMMANDS (Userbot - Works with . prefix in any chat)
 # ============================================================================
 
-@app.on_message(filters.command("stats", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("stats", prefixes=".") & (filters.user(ADMIN_ID)))
 async def stats_cmd(client: Client, message: Message):
     """Admin command to view system stats and database info."""
     cpu = psutil.cpu_percent()
@@ -429,7 +429,7 @@ async def stats_cmd(client: Client, message: Message):
     )
 
 
-@app.on_message(filters.command("broadcast", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("broadcast", prefixes=".") & (filters.user(ADMIN_ID)))
 async def broadcast_cmd(client: Client, message: Message):
     """Broadcast message to all bot users."""
     if len(message.command) < 2 and not message.reply_to_message:
@@ -457,7 +457,7 @@ async def broadcast_cmd(client: Client, message: Message):
     await msg.edit_text(f"<b>📢 Broadcast complete!</b>\n✅ Success: {succ}\n❌ Failed: {fail}")
 
 
-@app.on_message(filters.command("reply", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("reply", prefixes=".") & (filters.user(ADMIN_ID)))
 async def reply_cmd(client: Client, message: Message):
     """Send direct message to specific user."""
     if len(message.command) < 3:
@@ -472,7 +472,7 @@ async def reply_cmd(client: Client, message: Message):
         await message.reply_text(f"❌ Failed to send message: {e}")
 
 
-@app.on_message(filters.command("env", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("env", prefixes=".") & (filters.user(ADMIN_ID)))
 async def env_command(client: Client, message: Message):
     """
     View and manage environment variables.
@@ -541,7 +541,7 @@ async def env_callback(client: Client, call: CallbackQuery):
         await call.message.edit_text(text, reply_markup=keyboard)
 
 
-@app.on_message(filters.reply & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.reply & (filters.user(ADMIN_ID)))
 async def handle_env_edit(client: Client, message: Message):
     """Handle replies to env edit prompts from admin."""
     if not message.reply_to_message:
@@ -586,7 +586,7 @@ if __name__ == "__main__":
         print(f"[FATAL] {e}")
 
 
-@app.on_message(filters.command("clone_one", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+@app.on_message(filters.command("clone_one", prefixes=".") & (filters.user(ADMIN_ID)))
 async def clone_one_handler(client: Client, message: Message):
     try:
         if len(message.command) < 4:
