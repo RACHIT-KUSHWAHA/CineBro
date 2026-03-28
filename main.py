@@ -584,10 +584,13 @@ async def handle_env_edit(client: Client, message: Message):
 async def main():
     print("[LOG] Starting userbot dispatcher...")
     await setup_indexes()
-    await app.start()
-    print("[LOG] Online as @BeyondRachit")
-    await idle()
-    await app.stop()
+
+    async with app:
+        me = await app.get_me()
+        me_username = (me.username or "").strip()
+        me_label = f"@{me_username}" if me_username else (me.first_name or "(no-username)")
+        print(f"[LOG] Online as {me_label} (id={me.id})")
+        await idle()
 
 
 @app.on_message(filters.command("clone_one", prefixes=".") & (filters.user(ADMIN_ID)))
@@ -653,7 +656,7 @@ async def clone_one_handler(client: Client, message: Message):
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        app.run(main())
     except Exception as e:
         print(f"[FATAL] {e}")
 
