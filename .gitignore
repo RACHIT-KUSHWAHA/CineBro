@@ -5,6 +5,7 @@ __pycache__/
 venv/
 ENV/
 env/
+.venv/
 .env
 
 # Pyrogram / Telegram
@@ -14,5 +15,6 @@ env/
 # Database / Local files
 /tmp/
 db_backups/
+.env_backups/
 logs/
 config_local.py

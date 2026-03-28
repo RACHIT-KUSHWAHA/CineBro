@@ -1,42 +1,104 @@
-# CineBro Userbot & Search Bot
+# CineBro
 
-A powerful combination of a Telegram Userbot (for indexing and backing up files) and a highly responsive Search Bot (for serving files via clean inline UI). Developed with performance and scale in mind, handling tens of thousands of media documents elegantly.
+CineBro is a Telegram movie/series search bot + an admin userbot.
 
-## Features
-- **Smart Metadata Parsing:** Extracts seasons, episodes, language variants, and quality tags directly from raw filenames using complex Regex heuristics.
-- **Stealth Cloning:** Safely duplicates content from source channel to backup channel while instantly bypassing duplicates and pausing to evade Telegram's `FloodWait` (Anti-ban).
-- **Responsive Netflix-style UI:** Browse languages, qualities, and seasons with inline cyclic filtering. File buttons are beautifully formatted as `Movie/Show Title - Season (Quality)`.
-- **Database Architecture:** Optimized MongoDB schemas serving fast indexed searches using prefix checks and `$regex` queries preventing Out-of-Memory crashes.
+- The **Bot** serves users: search → buttons → file delivery.
+- The **Userbot** is admin-only: index/clone channels into MongoDB, manage `.env`, broadcast, etc.
 
 ## Requirements
-- Python 3.9+
-- MongoDB Database
-- A Telegram API ID & Hash
-- A Pyrogram String Session (for indexer/cloner)
-- A Bot Token (for serving files)
 
-## Setup
-1. Clone the repository natively.
-2. Install pip requirements: `pip install -r requirements.txt`.
-3. Overwrite or update `config.py` with your database credentials.
+- Python 3.10+ (works on 3.12 too)
+- MongoDB (Atlas is fine)
+- Telegram API ID + API HASH
+- Telegram Bot Token
+- Pyrogram String Session (for the userbot)
 
-## Commands Reference
-### Userbot / Indexer Commands (`main.py`)
-Run the userbot securely from your Telegram account.
-- `.index <chat_id_or_username>`: Crawl and index missing documents from the source chat directly to the MongoDB.
-- `.clone <source_chat> <dest_chat>`: Copies every file from the source chat to a destination backup chat securely with limits and indexes the new message IDs to the database.
-- `.flush`: Delete all indexed database entries.
-- `.status`: Displays active server status, RAM, CPU, and total indexed database entries.
+## Quick start
 
-### User Search Bot (`bot.py`)
-Run the Telegram bot to respond to ordinary users.
-- `/start`: Starts the bot interface for a private chat.
-- Text search: Just type any movie name! It handles limits and parses dynamically.
+### 1) Install
 
-## Project Structure
-- `main.py`: The userbot responsible for indexing, parsing metadata, and cloning channels safely.
-- `bot.py`: The frontend UI bot responding to user queries with cyclic filters.
-- `database.py`: Handles all MongoDB operations, optimization limits, schema setups, and filtering logic.
+```bash
+git clone <your-repo-url>
+cd CineBro
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
----
-**Disclaimer:** Use strictly within limits to prevent account suspension. CineBro securely uses rate limitations natively.
+### 2) Configure environment
+
+This project reads config from environment variables (see `config.py`).
+
+Create a `.env` file locally (it is ignored by git):
+
+```bash
+cp .env.example .env
+```
+
+Fill at minimum:
+
+- `API_ID`
+- `API_HASH`
+- `BOT_TOKEN`
+- `SESSION_STRING`
+- `MONGO_URI`
+- `DB_NAME`
+- `ADMIN_ID`
+- `DATABASE_CHANNEL_ID`
+- `LOG_CHANNEL_ID` (optional but recommended for audit logs)
+
+Notes:
+
+- `LOG_CHANNEL_ID` should be a group/channel where your bot + userbot can send messages.
+- If MongoDB password has special characters, URL-encode it.
+
+### 3) Run
+
+Run the bot (user-facing search):
+
+```bash
+python3 bot.py
+```
+
+Run the userbot (admin tools):
+
+```bash
+python3 main.py
+```
+
+## Bot usage (users)
+
+- Send any movie/series name in private chat.
+- For series: select a season, then an episode.
+- Use `/help` inside the bot for the short usage guide.
+
+## Userbot commands (admin)
+
+Userbot commands use the `.` prefix and only work for `ADMIN_ID`.
+
+- `.help` — full command help
+- `.id` — show chat/user/channel IDs
+- `.index <chat_id|@username|link>` — index media from a chat/channel into MongoDB
+- `.clone <source> <dest>` — copy media source → dest and index
+- `.clone_one <source> <dest> <msg_id>` — copy one message and index
+- `.env` — view/edit `.env` keys via Telegram (logs changes to `LOG_CHANNEL_ID`)
+- `.stats` / `.status` — health and database stats
+- `.broadcast <text>` (or reply + `.broadcast`) — send a message to all users
+- `.reply <user_id> <text>` — DM a specific user
+- `.flush` — delete all indexed movies (danger)
+
+## Project structure
+
+- `bot.py` — Telegram bot (search UI + delivery)
+- `main.py` — Telegram userbot (admin tools, indexing, cloning)
+- `auto_indexer.py` — channel auto-indexing helper
+- `database.py` — MongoDB operations
+- `env_manager.py` — `.env` editing helper
+- `audit_logger.py` — log-group audit utilities (startup, downloads, env changes)
+- `streamer.py` — streaming helper
+- `plugins/` — optional handlers
+
+## Safety
+
+This repository does not commit `.env` or session files.
+Use CineBro responsibly and respect Telegram limits to avoid FloodWait/account restrictions.

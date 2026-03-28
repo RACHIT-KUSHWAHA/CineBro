@@ -119,7 +119,7 @@ class EnvManager:
         
         critical_keys = [
             'API_ID', 'API_HASH', 'BOT_TOKEN', 'MONGO_URI',
-            'ADMIN_ID', 'DATABASE_CHANNEL_ID'
+            'ADMIN_ID', 'DATABASE_CHANNEL_ID', 'LOG_CHANNEL_ID'
         ]
         
         lines = ["🔍 <b>Critical Configuration Status:</b>\n"]

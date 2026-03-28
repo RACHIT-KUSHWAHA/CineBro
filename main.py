@@ -2,12 +2,21 @@ import asyncio
 import re
 import time
 import psutil
-from pyrogram import Client, filters, idle
+import logging
+from pyrogram import filters
+from pyrogram.client import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait, PeerIdInvalid
 import config
 from database import upsert_movie_document, flush_movies_collection, get_total_movies_count, setup_indexes, movies_col, get_all_users, get_total_users_count
 from env_manager import EnvManager
+from audit_logger import find_missing_keys, format_env_change, format_startup_report, send_log
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("cinebro.userbot")
 
 # Global start time for uptime
 start_time = time.time()
@@ -25,6 +34,7 @@ API_ID = _require_int("API_ID", config.API_ID)
 API_HASH = _require_str("API_HASH", config.API_HASH)
 SESSION_STRING = _require_str("SESSION_STRING", config.SESSION_STRING)
 ADMIN_ID = _require_int("ADMIN_ID", config.ADMIN_ID)
+LOG_CHANNEL_ID = getattr(config, "LOG_CHANNEL_ID", 0) or 0
 
 app = Client("userbot_main", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
@@ -164,22 +174,7 @@ async def safe_copy_message(client: Client, dest_chat_id: int, src_chat_id: int,
         try:
             return await client.copy_message(dest_chat_id, src_chat_id, src_msg_id)
         except FloodWait as flood:
-            await asyncio.sleep(flood.value + 2)
-
-@app.on_message(filters.all, group=-100)
-async def debug_handler(_: Client, message: Message):
-    """Debug handler to log all messages - helps identify if messages are reaching the app"""
-    text = message.text or message.caption or "<non-text message>"
-    user_id = message.from_user.id if message.from_user else "unknown"
-    username = message.from_user.username if message.from_user else "N/A"
-    is_admin = user_id == ADMIN_ID
-    
-    print(f"[RECV] User: {user_id} (@{username}) | Admin: {is_admin} | Msg: {text}")
-    
-    # Extra debug for commands
-    if text.startswith("."):
-        cmd = text.split()[0]
-        print(f"  → Command detected: {cmd} | Filter check: filters.user({ADMIN_ID}) = {user_id == ADMIN_ID}")
+            await asyncio.sleep(int(getattr(flood, "value", 0)) + 2)
 
 @app.on_message(filters.command("status", prefixes=".") & (filters.user(ADMIN_ID)))
 async def status_handler(client, message):
@@ -204,13 +199,23 @@ async def status_handler(client, message):
 async def help_handler(client: Client, message: Message):
     try:
         help_text = (
-            "<b>📘 CineBro Userbot Commands</b>\n\n"
-            "<b>1. .index &lt;chat_id&gt;</b> - Index media from chat\n"
-            "<b>2. .clone &lt;src&gt; &lt;dest&gt;</b> - Clone entire chat\n"
-            "<b>3. .clone_one &lt;src&gt; &lt;dest&gt; &lt;msg_id&gt;</b> - Clone specific message\n"
-            "<b>4. .id</b> - Reply to msg to get ID, or use in chat to get chat ID\n"
-            "<b>5. .status</b> - Show bot status\n"
-            "<b>6. .flush</b> - Clear database"
+            "<b>📘 CineBro Userbot Help</b>\n"
+            "<i>Prefix:</i> <code>.</code>  |  <i>Admin-only:</i> Yes\n\n"
+            "<b>Index / Clone</b>\n"
+            "• <code>.index &lt;chat_id|@username|link&gt;</code> — index media from a chat/channel into MongoDB\n"
+            "• <code>.clone &lt;source&gt; &lt;dest&gt;</code> — copy media from source → dest and index\n"
+            "• <code>.clone_one &lt;source&gt; &lt;dest&gt; &lt;msg_id&gt;</code> — copy one message and index\n\n"
+            "<b>Utilities</b>\n"
+            "• <code>.id</code> — get chat/user/channel IDs (reply to a message for target ID)\n"
+            "• <code>.status</code> — CPU/RAM/uptime + total indexed\n"
+            "• <code>.stats</code> — users + movies + system stats\n\n"
+            "<b>Admin Messaging</b>\n"
+            "• <code>.broadcast &lt;text&gt;</code> — send a message to all users (or reply + <code>.broadcast</code>)\n"
+            "• <code>.reply &lt;user_id&gt; &lt;text&gt;</code> — DM a specific user\n\n"
+            "<b>Configuration</b>\n"
+            "• <code>.env</code> — view/edit .env keys (sends audit logs to log group)\n\n"
+            "<b>Danger Zone</b>\n"
+            "• <code>.flush</code> — clear movies collection (cannot be undone)"
         )
         await message.reply_text(help_text)
     except Exception as e:
@@ -285,11 +290,11 @@ async def index_handler(client, message):
                             f"<b>⏳ Indexed {processed_count} files in {chat.title}...</b>"
                         )
                     except FloodWait as e:
-                        await asyncio.sleep(e.value + 1)
+                        await asyncio.sleep(int(getattr(e, "value", 0)) + 1)
 
                 await asyncio.sleep(0.05)
             except FloodWait as e:
-                await asyncio.sleep(e.value + 1)
+                await asyncio.sleep(int(getattr(e, "value", 0)) + 1)
             except Exception:
                 failed_count += 1
                 continue
@@ -361,7 +366,7 @@ async def clone_handler(client: Client, message: Message):
                                 f"⏭ Skipped: {skipped_count}"
                             )
                         except FloodWait as e:
-                            await asyncio.sleep(e.value + 1)
+                                await asyncio.sleep(int(getattr(e, "value", 0)) + 1)
                     continue
 
                 await asyncio.sleep(2.5)
@@ -393,7 +398,7 @@ async def clone_handler(client: Client, message: Message):
                             f"⏭ Skipped: {skipped_count}"
                         )
                     except FloodWait as e:
-                        await asyncio.sleep(e.value + 1)
+                        await asyncio.sleep(int(getattr(e, "value", 0)) + 1)
             except Exception:
                 failed_count += 1
                 continue
@@ -438,6 +443,16 @@ async def stats_cmd(client: Client, message: Message):
         f"<b>⏱️ Uptime:</b> {uptime}"
     )
 
+    await send_log(
+        client,
+        (
+            "📊 <b>Userbot stats requested</b>\n"
+            f"<b>By:</b> <a href='tg://user?id={message.from_user.id}'>Admin</a> (<code>{message.from_user.id}</code>)\n"
+            f"<b>Users:</b> {total_users} | <b>Movies:</b> {total_movies}\n"
+            f"<b>CPU:</b> {cpu}% | <b>RAM:</b> {ram}% | <b>Uptime:</b> {uptime}"
+        ),
+    )
+
 
 @app.on_message(filters.command("broadcast", prefixes=".") & (filters.user(ADMIN_ID)))
 async def broadcast_cmd(client: Client, message: Message):
@@ -460,11 +475,20 @@ async def broadcast_cmd(client: Client, message: Message):
             succ += 1
             await asyncio.sleep(0.1)
         except FloodWait as e:
-            await asyncio.sleep(e.value)
+            await asyncio.sleep(float(getattr(e, "value", 0)))
         except Exception:
             fail += 1
 
     await msg.edit_text(f"<b>📢 Broadcast complete!</b>\n✅ Success: {succ}\n❌ Failed: {fail}")
+
+    await send_log(
+        client,
+        (
+            "📣 <b>Broadcast finished</b>\n"
+            f"<b>By:</b> <a href='tg://user?id={message.from_user.id}'>Admin</a> (<code>{message.from_user.id}</code>)\n"
+            f"<b>Success:</b> {succ} | <b>Failed:</b> {fail}"
+        ),
+    )
 
 
 @app.on_message(filters.command("reply", prefixes=".") & (filters.user(ADMIN_ID)))
@@ -478,6 +502,15 @@ async def reply_cmd(client: Client, message: Message):
         msg_text = message.text.split(None, 2)[2]
         await client.send_message(user_id, f"<b>📩 Reply from Admin:</b>\n{msg_text}")
         await message.reply_text("✅ Message sent successfully.")
+
+        await send_log(
+            client,
+            (
+                "📩 <b>Admin replied to user</b>\n"
+                f"<b>By:</b> <a href='tg://user?id={message.from_user.id}'>Admin</a> (<code>{message.from_user.id}</code>)\n"
+                f"<b>To:</b> <code>{user_id}</code>"
+            ),
+        )
     except Exception as e:
         await message.reply_text(f"❌ Failed to send message: {e}")
 
@@ -500,7 +533,11 @@ async def env_command(client: Client, message: Message):
 @app.on_callback_query(filters.regex(r"^env_") & (filters.user(ADMIN_ID)))
 async def env_callback(client: Client, call: CallbackQuery):
     """Handle environment configuration callbacks."""
-    data = call.data
+    raw_data = call.data
+    if isinstance(raw_data, (bytes, bytearray, memoryview)):
+        data = bytes(raw_data).decode(errors="ignore")
+    else:
+        data = str(raw_data or "")
     
     if data == "env_full":
         text = env_manager.get_env_display()
@@ -508,15 +545,10 @@ async def env_callback(client: Client, call: CallbackQuery):
     
     elif data == "env_edit_menu":
         keys = env_manager.get_editable_keys()
-        keyboard = InlineKeyboardMarkup(size_multiplier=2)
-        buttons = [
-            InlineKeyboardButton(key, callback_data=f"env_edit_{key}")
-            for key in keys[:20]
-        ]
-        for i in range(0, len(buttons), 2):
-            keyboard.add(*buttons[i:i+2])
-        
-        keyboard.add(InlineKeyboardButton("❌ Cancel", callback_data="env_cancel"))
+        buttons = [InlineKeyboardButton(key, callback_data=f"env_edit_{key}") for key in keys[:20]]
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="env_cancel")])
+        keyboard = InlineKeyboardMarkup(rows)
         
         await call.message.edit_text(
             "✏️ <b>Select variable to edit:</b>",
@@ -569,6 +601,7 @@ async def handle_env_edit(client: Client, message: Message):
         return
     
     key = match.group(1)
+    old_value = env_manager.get_key_value(key)
     new_value = message.text.strip()
     
     # Update the value
@@ -580,16 +613,43 @@ async def handle_env_edit(client: Client, message: Message):
     
     await message.reply_text(response)
 
+    if success:
+        await send_log(client, format_env_change(message.from_user, key, old_value, new_value))
+
 
 async def main():
-    print("[LOG] Starting userbot dispatcher...")
+    logger.info("Starting userbot dispatcher...")
     await setup_indexes()
+
+    required = [
+        "API_ID",
+        "API_HASH",
+        "SESSION_STRING",
+        "MONGO_URI",
+        "DB_NAME",
+        "ADMIN_ID",
+        "LOG_CHANNEL_ID",
+    ]
+    env_snapshot = {
+        "API_ID": config.API_ID,
+        "API_HASH": config.API_HASH,
+        "SESSION_STRING": config.SESSION_STRING,
+        "MONGO_URI": config.MONGO_URI,
+        "DB_NAME": getattr(config, "DB_NAME", ""),
+        "ADMIN_ID": config.ADMIN_ID,
+        "LOG_CHANNEL_ID": getattr(config, "LOG_CHANNEL_ID", 0),
+    }
+    missing = find_missing_keys(env_snapshot, required)
 
     async with app:
         me = await app.get_me()
         me_username = (me.username or "").strip()
         me_label = f"@{me_username}" if me_username else (me.first_name or "(no-username)")
-        print(f"[LOG] Online as {me_label} (id={me.id})")
+        logger.info("Online as %s (id=%s)", me_label, me.id)
+        if LOG_CHANNEL_ID:
+            await send_log(app, format_startup_report("Userbot", missing))
+
+        from pyrogram import idle
         await idle()
 
 

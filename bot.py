@@ -1,7 +1,9 @@
 import asyncio
 import time
 import psutil
-from pyrogram import Client, filters
+import logging
+from pyrogram import filters
+from pyrogram.client import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -10,6 +12,13 @@ from bson import ObjectId
 from database import build_fuzzy_regex, movies_col, add_user, get_all_users, get_total_users_count, get_total_movies_count
 from utils import is_rate_limited, get_rate_limit_status
 from auto_indexer import AutoIndexer
+from audit_logger import find_missing_keys, format_download_log, format_startup_report, send_log
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("cinebro.bot")
 
 
 def format_size(size_bytes: int) -> str:
@@ -90,7 +99,7 @@ async def safe_copy_message(client: Client, chat_id: int, from_chat_id: int, mes
                 reply_markup=reply_markup
             )
         except FloodWait as flood:
-            await asyncio.sleep(flood.value + 1)
+            await asyncio.sleep(int(getattr(flood, "value", 0)) + 1)
 
 
 
@@ -124,21 +133,21 @@ async def schedule_auto_delete(client: Client, chat_id: int, message_id: int, de
         # Attempt deletion with logging
         try:
             await client.delete_messages(chat_id, message_id)
-            print(f"✅ Auto-deleted message {message_id} from chat {chat_id}")
+            logger.info("Auto-deleted message %s from chat %s", message_id, chat_id)
         except FloodWait as flood:
             # Respect Telegram flood limits even for deletions
-            print(f"⏳ Flood wait detected. Retrying deletion in {flood.value} seconds...")
+            logger.warning("FloodWait while deleting; retry in %ss", flood.value)
             await asyncio.sleep(flood.value + 1)
             try:
                 await client.delete_messages(chat_id, message_id)
-                print(f"✅ Auto-deleted message {message_id} from chat {chat_id} (after retry)")
+                logger.info("Auto-deleted message %s from chat %s (retry)", message_id, chat_id)
             except Exception as retry_exc:
-                print(f"❌ Auto-delete retry failed for {message_id}: {retry_exc}")
+                logger.warning("Auto-delete retry failed for %s: %s", message_id, retry_exc)
         except Exception as delete_exc:
-            print(f"❌ Auto-delete failed for {message_id}: {delete_exc}")
+            logger.warning("Auto-delete failed for %s: %s", message_id, delete_exc)
     
     except asyncio.CancelledError:
-        print(f"⚠️ Auto-delete task cancelled for {message_id}")
+        logger.info("Auto-delete task cancelled for %s", message_id)
     
     finally:
         # Cleanup task tracking
@@ -267,10 +276,21 @@ async def start_cmd(client: Client, message: Message):
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client: Client, message: Message):
     help_text = (
-        "<b>🎬 CineBro Help Menu</b>\n\n"
-        "Just send me any movie or series name and I will find it for you!\n"
+        "<b>🎬 CineBro Help</b>\n\n"
+        "<b>How to search</b>\n"
+        "• Just send a movie/series name in this chat\n"
+        "• You can add quality/language keywords too (example: <code>Avatar 2009 1080p Hindi</code>)\n\n"
+        "<b>How results work</b>\n"
+        "• Movies: you get a paginated list → tap a result to receive the file\n"
+        "• Series: select Season first → then select an episode\n\n"
+        "<b>Important</b>\n"
+        "• Auto-delete: delivered files may be deleted after 30 minutes\n"
+        "• If you want to keep it, forward to <b>Saved Messages</b>\n\n"
+        "<b>Commands</b>\n"
+        "• /start - Start\n"
+        "• /help - This help"
     )
-    await message.reply_text(help_text)
+    await message.reply_text(help_text, disable_web_page_preview=True)
 
 
 
@@ -291,13 +311,16 @@ async def search_and_deliver(client: Client, message: Message):
 
     if config.LOG_CHANNEL_ID:
         try:
-            name = message.from_user.first_name if message.from_user else "Unknown"
-            await client.send_message(
-                config.LOG_CHANNEL_ID,
-                f"<b>🔍 New Search</b>\n<b>User:</b> <a href='tg://user?id={user_id}'>{name}</a> (`{user_id}`)\n<b>Query:</b> {query_text}"
+            await send_log(
+                client,
+                (
+                    "🔍 <b>Search</b>\n"
+                    f"<b>User:</b> <a href='tg://user?id={user_id}'>{message.from_user.first_name if message.from_user else 'Unknown'}</a> (<code>{user_id}</code>)\n"
+                    f"<b>Query:</b> {query_text}"
+                ),
             )
         except Exception as e:
-            print(f"Log Error: {e}")
+            logger.warning("Failed to send search log: %s", e)
 
     if len(query_text) < 2:
         await message.reply_text("Please enter at least 2 characters to search.")
@@ -341,7 +364,7 @@ async def search_and_deliver(client: Client, message: Message):
                                             corrected_query = suggestion
                                             break
             except Exception as e:
-                print(f"IMDB Search Error: {e}")
+                logger.warning("IMDB search fallback error: %s", e)
             
             if corrected_query:
                 query_text = corrected_query
@@ -414,7 +437,13 @@ async def callback_season_selected(client: Client, call: CallbackQuery):
     STEP 2: When user selects a season, show available episodes.
     """
     try:
-        parts = call.data.split("|", 2)
+        raw_data = call.data
+        if isinstance(raw_data, (bytes, bytearray, memoryview)):
+            data = bytes(raw_data).decode(errors="ignore")
+        else:
+            data = str(raw_data or "")
+
+        parts = data.split("|", 2)
         if len(parts) < 3:
             await call.answer("Invalid season selection.", show_alert=True)
             return
@@ -490,13 +519,17 @@ async def callback_season_selected(client: Client, call: CallbackQuery):
         await call.answer()
         
     except Exception as e:
-        print(f"Season selection error: {e}")
+        logger.warning("Season selection error: %s", e)
         await call.answer(f"Error: {e}", show_alert=True)
 
 
 @app.on_callback_query()
 async def callback_router(client: Client, call: CallbackQuery):
-    data = call.data or ""
+    raw_data = call.data
+    if isinstance(raw_data, (bytes, bytearray, memoryview)):
+        data = bytes(raw_data).decode(errors="ignore")
+    else:
+        data = str(raw_data or "")
 
     if data.startswith("send_file|"):
         parts = data.split("|", 1)
@@ -603,6 +636,22 @@ async def callback_router(client: Client, call: CallbackQuery):
                     )
                 )
             await call.answer("File sent successfully!")
+
+            if sent is not None:
+                try:
+                    await send_log(
+                        client,
+                        format_download_log(
+                            call.from_user,
+                            title,
+                            season=season_val,
+                            quality=str(quality_val).upper() if quality_val else "",
+                            language=language_str,
+                            size=size,
+                        ),
+                    )
+                except Exception as log_exc:
+                    logger.warning("Failed to send download log: %s", log_exc)
         except Exception as exc:
             await call.answer("Failed to send file.", show_alert=True)
             await call.message.reply_text(f"❌ Delivery failed: {exc}")
@@ -610,7 +659,7 @@ async def callback_router(client: Client, call: CallbackQuery):
         # PRODUCTION FEATURE: Smart Fallback Disclaimer
         # Check if the delivered file might be a fallback (different quality/language than available best)
         # Send a separate message if needed
-        if sent is not None and "fallback_disclaimer" in call.data:
+        if sent is not None and "fallback_disclaimer" in data:
             try:
                 fallback_msg = (
                     "⚠️ <b>Quality/Language Fallback</b>\n\n"
@@ -695,30 +744,45 @@ async def handle_database_channel_auto_index(client: Client, message: Message):
 
 
 async def main():
-    print("Starting Telegram Bot Client...")
-    
-    # Setup Auto-Indexer indexes on startup
-    print("Setting up database indexes for auto-indexer...")
+    logger.info("Starting Telegram Bot Client...")
+
+    logger.info("Setting up database indexes for auto-indexer...")
     await auto_indexer.setup_indexes()
-    
-    await app.start()
 
-    me = await app.get_me()
-    print(f"✅ Bot Online as @{me.username}")
+    required = [
+        "API_ID",
+        "API_HASH",
+        "BOT_TOKEN",
+        "MONGO_URI",
+        "ADMIN_ID",
+        "DATABASE_CHANNEL_ID",
+        "LOG_CHANNEL_ID",
+    ]
+    env_snapshot = {
+        "API_ID": config.API_ID,
+        "API_HASH": config.API_HASH,
+        "BOT_TOKEN": config.BOT_TOKEN,
+        "MONGO_URI": config.MONGO_URI,
+        "ADMIN_ID": config.ADMIN_ID,
+        "DATABASE_CHANNEL_ID": getattr(config, "DATABASE_CHANNEL_ID", 0),
+        "LOG_CHANNEL_ID": getattr(config, "LOG_CHANNEL_ID", 0),
+    }
+    missing = find_missing_keys(env_snapshot, required)
 
-    # Start aiohttp streaming server using the bot client
-    from streamer import TelegramStreamer
-    streamer_app = TelegramStreamer(app)
-    await streamer_app.start(port=8080)
+    async with app:
+        me = await app.get_me()
+        logger.info("Bot online as @%s (id=%s)", me.username, me.id)
+        if config.LOG_CHANNEL_ID:
+            await send_log(app, format_startup_report("Bot", missing))
 
-    # Idle until stopped
-    from pyrogram import idle
-    await idle()
+        from streamer import TelegramStreamer
+        streamer_app = TelegramStreamer(app)
+        await streamer_app.start(port=8080)
 
-    await streamer_app.stop()
-    await app.stop()
+        from pyrogram import idle
+        await idle()
+
+        await streamer_app.stop()
 
 if __name__ == "__main__":
-    # Setup asyncio event loop manually to ensure DB indices apply properly
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    app.run(main())
