@@ -1,7 +1,6 @@
 import asyncio
 import time
 import psutil
-import re
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
@@ -11,7 +10,6 @@ from bson import ObjectId
 from database import build_fuzzy_regex, movies_col, add_user, get_all_users, get_total_users_count, get_total_movies_count
 from utils import is_rate_limited, get_rate_limit_status
 from auto_indexer import AutoIndexer
-from env_manager import EnvManager
 
 
 def format_size(size_bytes: int) -> str:
@@ -227,9 +225,6 @@ app = Client(
 mongo_client = AsyncIOMotorClient(config.MONGO_URI)
 auto_indexer = AutoIndexer(mongo_client, db_name="CineBro")
 
-# Initialize Environment Manager for admin config editing
-env_manager = EnvManager(".env")
-
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
@@ -275,176 +270,19 @@ async def help_cmd(client: Client, message: Message):
         "<b>🎬 CineBro Help Menu</b>\n\n"
         "Just send me any movie or series name and I will find it for you!\n"
     )
-    if message.from_user and message.from_user.id == config.ADMIN_ID:
-        help_text += (
-            "\n<b>👑 Admin Commands:</b>\n"
-            "<code>/stats</code> - Dashboard with CPU, RAM, Users, and Movies\n"
-            "<code>/broadcast &lt;msg&gt;</code> - Mass message all users (or reply to a msg)\n"
-            "<code>/reply &lt;user_id&gt; &lt;msg&gt;</code> - Message a specific user\n"
-            "<code>/env</code> - View and edit environment variables via Telegram\n"
-        )
     await message.reply_text(help_text)
 
-@app.on_message(filters.command("stats") & filters.user(config.ADMIN_ID) & filters.private)
-async def stats_cmd(client: Client, message: Message):
-    cpu = psutil.cpu_percent()
-    ram = psutil.virtual_memory().percent
-    uptime = time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - start_time))
-    total_users = await get_total_users_count()
-    total_movies = await get_total_movies_count()
-    pending_deletes = len(PENDING_DELETIONS)
-    
-    await message.reply_text(
-        f"<b>📊 Admin Dashboard</b>\n\n"
-        f"<b>👥 Total Users:</b> {total_users}\n"
-        f"<b>🎬 Indexed Movies:</b> {total_movies}\n"
-        f"<b>🖥 CPU Usage:</b> {cpu}%\n"
-        f"<b>🐏 RAM Usage:</b> {ram}%\n"
-        f"<b>⏳ Pending Auto-Deletes:</b> {pending_deletes}\n"
-        f"<b>⏱️ Uptime:</b> {uptime}"
-    )
-
-@app.on_message(filters.command("broadcast") & filters.user(config.ADMIN_ID) & filters.private)
-async def broadcast_cmd(client: Client, message: Message):
-    if len(message.command) < 2 and not message.reply_to_message:
-        return await message.reply_text("Please provide a message or reply to a message to broadcast.")
-    
-    msg = await message.reply_text("Broadcast started...")
-    succ = 0
-    fail = 0
-    users_cursor = await get_all_users()
-    
-    async for user in users_cursor:
-        try:
-            if message.reply_to_message:
-                await message.reply_to_message.copy(user["user_id"])
-            else:
-                await client.send_message(user["user_id"], message.text.split(None, 1)[1])
-            succ += 1
-            await asyncio.sleep(0.1)
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-        except Exception:
-            fail += 1
-
-    await msg.edit_text(f"Broadcast complete!\nSuccess: {succ}\nFailed: {fail}")
-
-@app.on_message(filters.command("reply") & filters.user(config.ADMIN_ID) & filters.private)
-async def reply_cmd(client: Client, message: Message):
-    if len(message.command) < 3:
-        return await message.reply_text("Usage: /reply <user_id> <message>")
-    
-    try:
-        user_id = int(message.command[1])
-        msg_text = message.text.split(None, 2)[2]
-        await client.send_message(user_id, f"<b>📩 Reply from Admin:</b>\n{msg_text}")
-        await message.reply_text("✅ Message sent successfully.")
-    except Exception as e:
-        await message.reply_text(f"❌ Failed to send message: {e}")
 
 
-@app.on_message(filters.command("env") & filters.user(config.ADMIN_ID) & filters.private)
-async def env_command(client: Client, message: Message):
-    """
-    Admin command to view and manage environment variables.
-    Shows configuration status and provides options to edit variables.
-    """
-    text = env_manager.get_env_summary()
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Full Config", callback_data="env_full"),
-         InlineKeyboardButton("✏️ Edit", callback_data="env_edit_menu")],
-        [InlineKeyboardButton("📦 Backups", callback_data="env_backups")]
-    ])
-    await message.reply_text(text, reply_markup=keyboard)
 
 
-@app.on_callback_query(filters.regex(r"^env_") & filters.user(config.ADMIN_ID))
-async def env_callback(client: Client, call: CallbackQuery):
-    """Handle environment configuration callbacks."""
-    data = call.data
-    
-    if data == "env_full":
-        text = env_manager.get_env_display()
-        await call.message.edit_text(text)
-    
-    elif data == "env_edit_menu":
-        keys = env_manager.get_editable_keys()
-        keyboard = InlineKeyboardMarkup(size_multiplier=2)
-        buttons = [
-            InlineKeyboardButton(key, callback_data=f"env_edit_{key}")
-            for key in keys[:20]  # Limit to 20 keys for Telegram button limit
-        ]
-        for i in range(0, len(buttons), 2):
-            keyboard.add(*buttons[i:i+2])
-        
-        keyboard.add(InlineKeyboardButton("❌ Cancel", callback_data="env_cancel"))
-        
-        await call.message.edit_text(
-            "✏️ <b>Select variable to edit:</b>",
-            reply_markup=keyboard
-        )
-    
-    elif data.startswith("env_edit_"):
-        key = data.replace("env_edit_", "")
-        current_value = env_manager.get_key_value(key)
-        current_display = env_manager._mask_value(key, current_value or "")
-        
-        await call.message.edit_text(
-            f"✏️ <b>Edit: {key}</b>\n\n"
-            f"<b>Current value:</b> <code>{current_display}</code>\n\n"
-            f"<b>📝 Send the new value (reply to this message):</b>",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="env_edit_menu")]
-            ])
-        )
-    
-    elif data == "env_backups":
-        text = env_manager.get_backup_list()
-        await call.message.edit_text(text)
-    
-    elif data == "env_cancel":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 Full Config", callback_data="env_full"),
-             InlineKeyboardButton("✏️ Edit", callback_data="env_edit_menu")],
-            [InlineKeyboardButton("📦 Backups", callback_data="env_backups")]
-        ])
-        await call.message.edit_text(
-            env_manager.get_env_summary(),
-            reply_markup=keyboard
-        )
 
 
-@app.on_message(filters.reply & filters.user(config.ADMIN_ID) & filters.private & ~filters.command())
-async def handle_env_edit(client: Client, message: Message):
-    """Handle replies to env edit prompts from admin."""
-    if not message.reply_to_message:
-        return
-    
-    reply_text = message.reply_to_message.text or ""
-    
-    # Check if this is an env edit prompt
-    if "✏️ <b>Edit:" not in reply_text:
-        return
-    
-    # Extract the key name from the prompt
-    match = re.search(r"✏️ <b>Edit: (\w+)</b>", reply_text)
-    if not match:
-        return
-    
-    key = match.group(1)
-    new_value = message.text.strip()
-    
-    # Update the value
-    success, result_msg = env_manager.set_value(key, new_value)
-    
-    response = result_msg
-    if success:
-        response += "\n\n🔄 <b>Note:</b> Restart the bot to apply changes."
-    
-    await message.reply_text(response)
 
 
-@app.on_message(filters.private & ~filters.command(["start", "help", "stats", "broadcast", "reply", "env"]))
+
+
+@app.on_message(filters.private & ~filters.command(["start", "help"]))
 async def search_and_deliver(client: Client, message: Message):
     user_id = message.from_user.id if message.from_user else 0
     query_text = (message.text or "").strip()

@@ -1,11 +1,13 @@
 import asyncio
 import re
 import time
+import psutil
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait, PeerIdInvalid
 import config
-from database import upsert_movie_document, flush_movies_collection, get_total_movies_count, setup_indexes, movies_col
+from database import upsert_movie_document, flush_movies_collection, get_total_movies_count, setup_indexes, movies_col, get_all_users, get_total_users_count
+from env_manager import EnvManager
 
 # Global start time for uptime
 start_time = time.time()
@@ -25,6 +27,12 @@ SESSION_STRING = _require_str("SESSION_STRING", config.SESSION_STRING)
 ADMIN_ID = _require_int("ADMIN_ID", config.ADMIN_ID)
 
 app = Client("userbot_main", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+
+# Initialize Environment Manager for admin config editing
+env_manager = EnvManager(".env")
+
+# Global start time for uptime tracking
+start_time = time.time()
 
 QUALITY_PATTERN = re.compile(r"\b(480p|720p|1080p|2160p|4k)\b", re.IGNORECASE)
 YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
@@ -396,6 +404,172 @@ async def flush_db(client, message):
         await message.reply_text(f"<b>🗑 Database flushed successfully!</b>\n<b>Deleted:</b> {deleted}")
     except Exception as e:
         await message.reply_text(f"❌ Flush Error: {e}")
+
+
+# ============================================================================
+# ADMIN COMMANDS (Userbot - Works with . prefix in any chat)
+# ============================================================================
+
+@app.on_message(filters.command("stats", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def stats_cmd(client: Client, message: Message):
+    """Admin command to view system stats and database info."""
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory().percent
+    uptime = time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - start_time))
+    total_users = await get_total_users_count()
+    total_movies = await get_total_movies_count()
+    
+    await message.reply_text(
+        f"<b>📊 Admin Dashboard</b>\n\n"
+        f"<b>👥 Total Users:</b> {total_users}\n"
+        f"<b>🎬 Indexed Movies:</b> {total_movies}\n"
+        f"<b>🖥 CPU Usage:</b> {cpu}%\n"
+        f"<b>🐏 RAM Usage:</b> {ram}%\n"
+        f"<b>⏱️ Uptime:</b> {uptime}"
+    )
+
+
+@app.on_message(filters.command("broadcast", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def broadcast_cmd(client: Client, message: Message):
+    """Broadcast message to all bot users."""
+    if len(message.command) < 2 and not message.reply_to_message:
+        return await message.reply_text("Usage: .broadcast <message> or reply to a message with .broadcast")
+    
+    msg = await message.reply_text("Broadcast started...")
+    succ = 0
+    fail = 0
+    users_cursor = await get_all_users()
+    
+    async for user in users_cursor:
+        try:
+            if message.reply_to_message:
+                await message.reply_to_message.copy(user["user_id"])
+            else:
+                text = message.text.split(None, 1)[1]
+                await client.send_message(user["user_id"], text)
+            succ += 1
+            await asyncio.sleep(0.1)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+        except Exception:
+            fail += 1
+
+    await msg.edit_text(f"<b>📢 Broadcast complete!</b>\n✅ Success: {succ}\n❌ Failed: {fail}")
+
+
+@app.on_message(filters.command("reply", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def reply_cmd(client: Client, message: Message):
+    """Send direct message to specific user."""
+    if len(message.command) < 3:
+        return await message.reply_text("Usage: .reply <user_id> <message>")
+    
+    try:
+        user_id = int(message.command[1])
+        msg_text = message.text.split(None, 2)[2]
+        await client.send_message(user_id, f"<b>📩 Reply from Admin:</b>\n{msg_text}")
+        await message.reply_text("✅ Message sent successfully.")
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to send message: {e}")
+
+
+@app.on_message(filters.command("env", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+async def env_command(client: Client, message: Message):
+    """
+    View and manage environment variables.
+    Shows configuration status and provides options to edit variables.
+    """
+    text = env_manager.get_env_summary()
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Full", callback_data="env_full"),
+         InlineKeyboardButton("✏️ Edit", callback_data="env_edit_menu")],
+        [InlineKeyboardButton("📦 Backups", callback_data="env_backups")]
+    ])
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+@app.on_callback_query(filters.regex(r"^env_") & (filters.user(ADMIN_ID)))
+async def env_callback(client: Client, call: CallbackQuery):
+    """Handle environment configuration callbacks."""
+    data = call.data
+    
+    if data == "env_full":
+        text = env_manager.get_env_display()
+        await call.message.edit_text(text)
+    
+    elif data == "env_edit_menu":
+        keys = env_manager.get_editable_keys()
+        keyboard = InlineKeyboardMarkup(size_multiplier=2)
+        buttons = [
+            InlineKeyboardButton(key, callback_data=f"env_edit_{key}")
+            for key in keys[:20]
+        ]
+        for i in range(0, len(buttons), 2):
+            keyboard.add(*buttons[i:i+2])
+        
+        keyboard.add(InlineKeyboardButton("❌ Cancel", callback_data="env_cancel"))
+        
+        await call.message.edit_text(
+            "✏️ <b>Select variable to edit:</b>",
+            reply_markup=keyboard
+        )
+    
+    elif data.startswith("env_edit_"):
+        key = data.replace("env_edit_", "")
+        current_value = env_manager.get_key_value(key)
+        current_display = env_manager._mask_value(key, current_value or "")
+        
+        await call.message.edit_text(
+            f"✏️ <b>Edit: {key}</b>\n\n"
+            f"<b>Current:</b> <code>{current_display}</code>\n\n"
+            f"<b>📝 Reply with new value:</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="env_edit_menu")]
+            ])
+        )
+    
+    elif data == "env_backups":
+        text = env_manager.get_backup_list()
+        await call.message.edit_text(text)
+    
+    elif data == "env_cancel":
+        text = env_manager.get_env_summary()
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Full", callback_data="env_full"),
+             InlineKeyboardButton("✏️ Edit", callback_data="env_edit_menu")],
+            [InlineKeyboardButton("📦 Backups", callback_data="env_backups")]
+        ])
+        await call.message.edit_text(text, reply_markup=keyboard)
+
+
+@app.on_message(filters.reply & (filters.me | filters.user(ADMIN_ID)) & ~filters.command())
+async def handle_env_edit(client: Client, message: Message):
+    """Handle replies to env edit prompts from admin."""
+    if not message.reply_to_message:
+        return
+    
+    reply_text = message.reply_to_message.text or ""
+    
+    # Check if this is an env edit prompt
+    if "✏️ <b>Edit:" not in reply_text:
+        return
+    
+    # Extract the key name from the prompt
+    match = re.search(r"✏️ <b>Edit: (\w+)</b>", reply_text)
+    if not match:
+        return
+    
+    key = match.group(1)
+    new_value = message.text.strip()
+    
+    # Update the value
+    success, result_msg = env_manager.set_value(key, new_value)
+    
+    response = result_msg
+    if success:
+        response += "\n\n🔄 <b>Note:</b> Restart the bot to apply changes."
+    
+    await message.reply_text(response)
+
 
 async def main():
     print("[LOG] Starting userbot dispatcher...")
