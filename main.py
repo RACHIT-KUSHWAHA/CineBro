@@ -167,9 +167,19 @@ async def safe_copy_message(client: Client, dest_chat_id: int, src_chat_id: int,
             await asyncio.sleep(flood.value + 2)
 
 @app.on_message(filters.all, group=-100)
-async def log_every_message(_: Client, message: Message):
+async def debug_handler(_: Client, message: Message):
+    """Debug handler to log all messages - helps identify if messages are reaching the app"""
     text = message.text or message.caption or "<non-text message>"
-    print(f"[LOG] Message received: {text}")
+    user_id = message.from_user.id if message.from_user else "unknown"
+    username = message.from_user.username if message.from_user else "N/A"
+    is_admin = user_id == ADMIN_ID
+    
+    print(f"[RECV] User: {user_id} (@{username}) | Admin: {is_admin} | Msg: {text}")
+    
+    # Extra debug for commands
+    if text.startswith("."):
+        cmd = text.split()[0]
+        print(f"  → Command detected: {cmd} | Filter check: filters.user({ADMIN_ID}) = {user_id == ADMIN_ID}")
 
 @app.on_message(filters.command("status", prefixes=".") & (filters.user(ADMIN_ID)))
 async def status_handler(client, message):
