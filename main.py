@@ -407,7 +407,7 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        app.run(main())
+        asyncio.run(main())
     except Exception as e:
         print(f"[FATAL] {e}")
 
