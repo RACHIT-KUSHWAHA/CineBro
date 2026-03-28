@@ -579,12 +579,6 @@ async def main():
     await idle()
     await app.stop()
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"[FATAL] {e}")
-
 
 @app.on_message(filters.command("clone_one", prefixes=".") & (filters.user(ADMIN_ID)))
 async def clone_one_handler(client: Client, message: Message):
@@ -645,4 +639,11 @@ async def clone_one_handler(client: Client, message: Message):
         await progress.edit("<b>✅ Clone One Complete!</b>\nFile successfully cloned and indexed.")
     except Exception as e:
         await message.reply_text(f"❌ Error during clone_one: {e}")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"[FATAL] {e}")
 
