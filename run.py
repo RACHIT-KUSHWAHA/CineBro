@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-CineBro Production Bot - Entry Point
-Runs the telegram search bot with production-grade features.
+CineBro - Simple Bot Starter
+Just initializes indexes and runs the bot!
 """
 
 import sys
 import asyncio
 from pyrogram import idle
-from bot import app, start_time
+from bot import app
 from database import setup_indexes
 import config
 
@@ -16,10 +16,13 @@ async def main():
     """Initialize database indexes and start bot."""
     print("🔧 Initializing database indexes...")
     await setup_indexes()
-    print("✅ Database initialization complete")
+    print("✅ Database initialization complete\n")
     
     print("🚀 Starting CineBro bot...")
     await app.start()
+    
+    me = await app.get_me()
+    print(f"✅ Bot Online as @{me.username}\n")
     
     print("""
 ╔════════════════════════════════════════════════════════════╗
@@ -34,30 +37,28 @@ async def main():
 ║  ✅ Production Indexes (Millisecond queries)              ║
 ║  ✅ Async Motor (Non-blocking DB)                         ║
 ║                                                            ║
-║  Admin Commands:                                           ║
-║  /stats        - Dashboard (CPU, RAM, Users, Movies)      ║
-║  /broadcast    - Message all users                        ║
-║  /reply        - Send DM to user                          ║
+║  Commands:                                                 ║
+║  /start       - Welcome message                           ║
+║  /help        - Help menu                                 ║
+║  /stats       - Admin dashboard                           ║
 ║                                                            ║
-║  Deployment Checklist:                                     ║
-║  ✅ Async Motor configured                                ║
-║  ✅ Rate limiter (5/min sliding window)                   ║
-║  ✅ Compound indexes for performance                      ║
-║  ✅ Auto-delete with FloodWait retry                      ║
-║  ✅ Series hierarchy detection                            ║
-║  ✅ Smart fallback disclaimers                            ║
-║  ✅ Admin monitoring & tracking                           ║
+║  Just type a movie name to search!                         ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
     """)
     
-    print(f"🌐 Bot ready for incoming messages...")
-    print(f"⏱️  Start time: {start_time}\n")
+    print("🌐 Bot ready for incoming messages...")
+    print("   Use Ctrl+C to stop\n")
+    
+    # Keep bot running forever
+    await idle()
+    
+    await app.stop()
 
 
 if __name__ == "__main__":
     print("CineBro - Telegram File Indexer Bot")
-    print("=" * 50)
+    print("=" * 50 + "\n")
     
     # Validate configuration
     if not config.API_ID or not config.API_HASH or not config.BOT_TOKEN:
@@ -70,14 +71,8 @@ if __name__ == "__main__":
         sys.exit(1)
     
     try:
-        # Initialize bot and create event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
-        
-        # Keep bot running
-        idle()
-        
+        # Run using asyncio (handles event loop properly)
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n✅ Bot stopped gracefully")
     except Exception as e:
