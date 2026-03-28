@@ -4,25 +4,24 @@ CineBro Production Bot - Entry Point
 Runs the telegram search bot with production-grade features.
 """
 
-import asyncio
 import sys
+import asyncio
 from pyrogram import idle
 from bot import app, start_time
 from database import setup_indexes
 import config
 
 
-async def initialize_bot():
+async def main():
     """Initialize database indexes and start bot."""
-    try:
-        print("🔧 Initializing database indexes...")
-        await setup_indexes()
-        print("✅ Database initialization complete")
-        
-        print("🚀 Starting CineBro bot...")
-        await app.start()
-        
-        print("""
+    print("🔧 Initializing database indexes...")
+    await setup_indexes()
+    print("✅ Database initialization complete")
+    
+    print("🚀 Starting CineBro bot...")
+    await app.start()
+    
+    print("""
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║
 ║         🎬 CineBro - Production Bot Started 🎬            ║
@@ -50,22 +49,10 @@ async def initialize_bot():
 ║  ✅ Admin monitoring & tracking                           ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
-        """)
-        
-        print(f"🌐 Bot ready for incoming messages...")
-        print(f"⏱️  Start time: {start_time}")
-        
-        await idle()
-        
-    except KeyboardInterrupt:
-        print("\n⚠️  Bot interrupted by user")
-    except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        print("🛑 Stopping bot...")
-        await app.stop()
+    """)
+    
+    print(f"🌐 Bot ready for incoming messages...")
+    print(f"⏱️  Start time: {start_time}\n")
 
 
 if __name__ == "__main__":
@@ -82,8 +69,19 @@ if __name__ == "__main__":
         print("❌ Error: Missing MONGO_URI in .env")
         sys.exit(1)
     
-    # Run bot
     try:
-        asyncio.run(initialize_bot())
+        # Initialize bot and create event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
+        
+        # Keep bot running
+        idle()
+        
     except KeyboardInterrupt:
         print("\n✅ Bot stopped gracefully")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
