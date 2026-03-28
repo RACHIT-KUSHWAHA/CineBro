@@ -41,20 +41,33 @@ def _lang_match(item_language: str, target_language: str) -> bool:
 
 async def setup_indexes():
     """
-    Creates the required indexes for fuzzy search and unique file storage.
+    Creates required indexes for production-grade fuzzy search and filtering.
+    Compound indexes optimize series/season/quality filtering significantly.
     """
-    await movies_col.create_index([("clean_title", 1)])
-    await movies_col.create_index([("title", 1)])
+    # Basic indexes
     await movies_col.create_index([("file_id", 1)], unique=True)
     await movies_col.create_index([("msg_id", 1)])
     await movies_col.create_index([("source_chat_id", 1)])
     
-    # Filter specific indexes to prevent slow distinct() queries on high traffic
-    await movies_col.create_index([("languages", 1)])
+    # Text search indexes
+    await movies_col.create_index([("clean_title", 1)])
+    await movies_col.create_index([("title", 1)])
+    
+    # Compound indexes for performance (returns results in milliseconds)
+    await movies_col.create_index([("clean_title", 1), ("season", 1)])
+    await movies_col.create_index([("title", 1), ("season", 1)])
+    await movies_col.create_index([("clean_title", 1), ("quality", 1), ("language", 1)])
+    await movies_col.create_index([("title", 1), ("quality", 1), ("language", 1)])
+    
+    # Filter indexes to prevent slow distinct() queries on high traffic
     await movies_col.create_index([("quality", 1)])
     await movies_col.create_index([("season", 1)])
+    await movies_col.create_index([("language", 1)])
+    await movies_col.create_index([("languages", 1)])
+    
+    # Users collection
     await users_col.create_index([("user_id", 1)], unique=True)
-    print("Database indexes created successfully.")
+    print("✅ Production indexes created successfully.")
 
 async def insert_movies_batch(movies_list):
     """

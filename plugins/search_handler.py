@@ -206,12 +206,50 @@ async def cb_quality_selected(client: Client, query: CallbackQuery):
 
     await query.message.reply_text("Sending file...")
 
+    # PRODUCTION FEATURE: Smart Fallback Detection & Disclaimer
+    is_fallback = False
+    fallback_reason = None
+    
+    # Check if quality was fallback (different from requested)
+    requested_quality = session.get("requested_quality", "").lower() if "requested_quality" in session else ""
+    if requested_quality and requested_quality != (picked.get("quality", "").lower()):
+        is_fallback = True
+        fallback_reason = f"Quality fallback: Requested {requested_quality}, got {picked.get('quality', 'unknown').upper()}"
+    
+    # Check if language was fallback (different from requested)
+    requested_lang = session.get("selected_lang", "").lower() if "selected_lang" in session else ""
+    if requested_lang and requested_lang not in (picked.get("language", "").lower() or ""):
+        is_fallback = True
+        fallback_reason = f"Language fallback: Requested {requested_lang}, got {picked.get('language', 'unknown')}"
+
+    # Build enhanced caption with fallback disclaimer
+    caption_parts = [
+        "⚠️ <b>FILE DELETION WARNING</b>\n"
+        "This file will be <b>automatically deleted in 30 minutes</b> for copyright protection.\n"
+        "<b>➡️ Forward to 'Saved Messages' immediately to keep it.</b>"
+    ]
+    
+    # Add fallback disclaimer if applicable
+    if is_fallback and fallback_reason:
+        caption_parts.append("\n" + "─" * 40)
+        caption_parts.append("⚠️ <b>QUALITY/LANGUAGE FALLBACK</b>")
+        caption_parts.append(fallback_reason)
+        caption_parts.append("This is the <b>best available alternative</b> for your search.")
+    
+    caption_parts.append("\n" + "─" * 40)
+    caption_parts.append("💡 <b>Playback Tips:</b>")
+    caption_parts.append("• Best: MX Player, VLC, or Telegram player")
+    caption_parts.append("• Avoid: Browser web player (quality issues)")
+    caption_parts.append("• Direct download for fastest speeds")
+    
+    caption = "\n".join(caption_parts)
+
     try:
         sent_msg = await client.copy_message(
             chat_id=query.from_user.id,
             from_chat_id=source_chat_id,
             message_id=msg_id,
-            caption="⚠️ **Please forward this file to your Saved Messages or another chat.**\n\n_Because this file will be deleted in 30 minutes to avoid copyright bans._\n\nDelivered by Movie Bot"
+            caption=caption
         )
         if sent_msg:
             async def auto_delete():
@@ -222,4 +260,4 @@ async def cb_quality_selected(client: Client, query: CallbackQuery):
                     pass
             asyncio.create_task(auto_delete())
     except Exception as exc:
-        await query.message.reply_text(f"Error sending file: {exc}")
+        await query.message.reply_text(f"❌ Error sending file: {exc}")

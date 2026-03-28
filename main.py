@@ -409,7 +409,10 @@ if __name__ == "__main__":
     try:
         app.run(main())
     except Exception as e:
-        print(f"[FATAL] {e}")@app.on_message(filters.command("clone_one", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
+        print(f"[FATAL] {e}")
+
+
+@app.on_message(filters.command("clone_one", prefixes=".") & (filters.me | filters.user(ADMIN_ID)))
 async def clone_one_handler(client: Client, message: Message):
     try:
         if len(message.command) < 4:
