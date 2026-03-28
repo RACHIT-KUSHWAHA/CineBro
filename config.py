@@ -14,6 +14,7 @@ DB_NAME = os.environ.get("DB_NAME", "MoviesBot")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 STORAGE_CHANNEL = int(os.environ.get("STORAGE_CHANNEL", "0"))
 BACKUP_CHANNEL = int(os.environ.get("BACKUP_CHANNEL", "0"))
+DATABASE_CHANNEL_ID = int(os.environ.get("DATABASE_CHANNEL_ID", "0"))
 
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 SUPPORT_GROUP_LINK = os.environ.get("SUPPORT_GROUP_LINK", "https://t.me/Group")

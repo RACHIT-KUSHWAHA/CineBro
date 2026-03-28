@@ -4,10 +4,12 @@ import psutil
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
+from motor.motor_asyncio import AsyncIOMotorClient
 import config
 from bson import ObjectId
 from database import build_fuzzy_regex, movies_col, add_user, get_all_users, get_total_users_count, get_total_movies_count
 from utils import is_rate_limited, get_rate_limit_status
+from auto_indexer import AutoIndexer
 
 
 def format_size(size_bytes: int) -> str:
@@ -211,12 +213,18 @@ def build_results_keyboard(query_text: str, page: int, movies: list, total: int)
 
     return InlineKeyboardMarkup(rows)
 
+# Initialize Pyrogram Bot Client
 app = Client(
     "MovieSearchBot",
     api_id=config.API_ID,
     api_hash=config.API_HASH,
     bot_token=config.BOT_TOKEN,
 )
+
+# Initialize Auto-Indexer for database channel
+mongo_client = AsyncIOMotorClient(config.MONGO_URI)
+auto_indexer = AutoIndexer(mongo_client, db_name="CineBro")
+
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
@@ -708,8 +716,45 @@ async def callback_router(client: Client, call: CallbackQuery):
         return
 
 
+@app.on_message(filters.chat(config.DATABASE_CHANNEL_ID))
+async def handle_database_channel_auto_index(client: Client, message: Message):
+    """
+    Auto-Indexer Handler: Automatically catches and indexes new files in database channel.
+    
+    Extracts metadata (file_id, file_unique_id, file_name, size, etc.) and saves to MongoDB
+    with intelligent deduplication using UpdateOne with upsert=True.
+    
+    This runs in background without sending any replies - completely silent operation.
+    """
+    try:
+        # Process through auto-indexer (extract metadata + upsert to DB)
+        success = await auto_indexer.process_message(message)
+        
+        # Optional: Send summary notification to admin every 50 new files
+        if success:
+            indexed_count = await auto_indexer.get_channel_indexed_count()
+            if indexed_count % 50 == 0:  # Notify admin on milestones
+                total_count = await auto_indexer.get_indexed_count()
+                await client.send_message(
+                    config.ADMIN_ID,
+                    f"📦 <b>Auto-Indexer Milestone:</b>\n"
+                    f"✓ {indexed_count} files indexed in database channel\n"
+                    f"💾 {total_count} total files in MongoDB",
+                    disable_web_page_preview=True
+                )
+    except Exception as e:
+        # Log errors but don't disrupt indexing
+        import logging
+        logging.error(f"Auto-indexer error: {e}")
+
+
 async def main():
     print("Starting Telegram Bot Client...")
+    
+    # Setup Auto-Indexer indexes on startup
+    print("Setting up database indexes for auto-indexer...")
+    await auto_indexer.setup_indexes()
+    
     await app.start()
 
     me = await app.get_me()
